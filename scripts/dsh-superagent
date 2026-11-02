@@ -179,8 +179,14 @@ def start(args):
         log = ARTIFACTS / f'dsh-superagent-{args.profile}-{stamp}-{os.getpid()}.log'
         log.touch()
         prune_logs(args.profile)
+        # An optional proxy for this service only, sourced inside the pane so it never reaches other tmux
+        # sessions, and read on every start so restarts (the hourly check) keep it. DSH_HOME wins, then the checkout.
+        proxy_file = Path(os.environ.get('DSH_HOME') or Path.home() / '.dsh') / 'superagent-proxy.env'
+        if not proxy_file.is_file():
+            proxy_file = ROOT / 'superagent-proxy.env'
+        proxy_source = f'set -a; . {shlex.quote(str(proxy_file))}; set +a; ' if proxy_file.is_file() else ''
         # `exec` replaces the shell so the pane PID printed by tmux is the DSH service process itself.
-        command = ('umask 077; exec ' + shlex.join([dsh, '--profile', args.profile, '--no-open'])
+        command = ('umask 077; ' + proxy_source + 'exec ' + shlex.join([dsh, '--profile', args.profile, '--no-open'])
                    + ' >> ' + shlex.quote(str(log)) + ' 2>&1')
         # Reuse an existing tmux session without disturbing other windows.
         target = ['new-window', '-t', '=' + session + ':'] if exists else ['new-session', '-s', session]
