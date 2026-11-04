@@ -449,11 +449,20 @@ Gitee 有与 GitHub 通知对等的接口：`/notifications/threads` 列出授�
 | --- | --- | --- |
 | Gitee 的机器人标记 | `GET /user` 的 `type`/`bot_info`、Gitee Go 等自动账号的登录名规则 | 全部按人处理；策略的 `bots` 名单保留但暂不生效，不要把自动化账号加入 `allowed` |
 | 提交邮箱 | Gitee 账号是否有 noreply/隐私邮箱，是否允许 API 读取 | 不声明 `DSH_SUPERAGENT_GITEE_COMMIT_EMAIL`，由提示词或工单指定作者 |
-| PR 详情与列表的字段一致性 | `GET /pulls/{n}` 是否与列表一样给出 `merged_at`、`state`、`head`、`base` | 以详情为准；字段缺失时退回列表对象（阶段 4） |
+| PR 详情与列表的字段一致性 | `GET /pulls/{n}` 是否与列表一样给出 `merged_at`、`state`、`head`、`base` | 阶段 4 用详情读取 `orchestrator_report` 的 PR，轮询观察则直接用列表对象；详情缺字段时的列表回退尚未实现，需真实响应确认 |
 | 通知的 `subject.type`/`subject.url` 取值 | 一条真实的 `/notifications/threads` 响应，看 `url` 指向 API 还是网页 | 阶段 6 前不读通知；阶段 6 只把通知当线索，不解析 URL 造 Trigger |
 | Gitee 的限流/分页头 | 正常与超限响应里的 `X-RateLimit-*`、`Retry-After`、`Link` 头 | 不依赖条件请求；每轮最多 10 页；失败按 `failuresBeforeError` 报错 |
 | check-runs 与 Gitee Go | Gitee Go 是否写 check-runs；默认分支的 CI 怎么读；是否有审查/测试状态 | 阶段 6 前不接 CI，不加 CI 的准入行 |
 | 私有 Gitee 部署 | 私有主机是否同样提供 v5 API、通知、check-runs，PAT scope 是否一致 | 首版只验证 gitee.com；`hostname` 字段保留并在面板标注 |
+
+### 9.4 阶段 4（PR 投递）的实现约定
+
+- `SourceKind.pullRequest` 是可选的 PR 能力（`PullRequestKind`）：`number(thread)`、`read(commands, deployment, number, signal)`、`claim(ctx, ticketId, pr)`、`observe(ctx, pr)`、`notices(ticket, request, deployment)`。`SourceRegistry.pullRequests(source)` 是唯一的取用入口。
+- `PullRequest` 是跨来源的归一化对象：`number`、`state`、`merged`、`mergedAt`、`closedAt`、`htmlUrl`、`head`、`author`、`repository`，以及 GitHub 才有的 `headRepository`、`headSha`、`autoMerge`。Gitee 的 `head` 按分支名读取（也容忍带 `ref` 的对象）。
+- `orchestrator_report` 先用工单跟随的 PR 的来源，否则用触发工单的来源；Feishu 工单沿用本版部署的 GitHub 交付主机，Gitee 工单没有 PR 能力时返回明确错误，不回退到 GitHub。
+- Gitee 的 `claim` 按「作者是智能体账号 + `repository` 是配置的仓库 + `head` 最后一段等于 `DSH_SUPERAGENT_NAME`」绑定；来源 PR 仍按 Trigger 的 `meta.kind`/`meta.target` 与 `meta.number` 匹配。`observe` 以 `merged_at` 判合并、`state === 'closed'` 且未合并判关闭；结束时调用 `threadClosed`。
+- 轮询每轮观察 `/pulls` 返回的 PR，并逐个读取开放工单跟随的 PR；`notices` 复用 `pullEndNotices` 的文案与稳定 id，只发给非 Gitee 渠道。
+- worker 提示词以 `DSH_SUPERAGENT_GITEE_REPOSITORY` 非空作为 Gitee 分支：`gitee-cli pr create` 开 PR、`gitee-cli pr view` 读状态，Gitee PR 由人合并，不假设 `gh`、GitHub 变量或 `refs/pull/<n>/head`。
 
 ## 10. 验收
 

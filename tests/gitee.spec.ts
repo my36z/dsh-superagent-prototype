@@ -2,9 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Engine, type Assessor, type Executor, type OutboundMessage, type Trigger } from '../src/core/index.ts'
+import { Engine, type Assessor, type Executor, type OutboundMessage, type Ticket, type Trigger } from '../src/core/index.ts'
 import { Store } from '../src/app/store.ts'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
+import { executorTools } from '../src/app/tools/executor.ts'
 import { Commands, commandError } from '../src/infra/commands.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import { KV } from '../src/kv.ts'
@@ -14,8 +15,10 @@ import { GiteeAccountsSchema, resolveGitee, SETUP_FIELDS } from '../src/deployme
 import { SetupError } from '../src/setup.ts'
 import { GiteeConfigSchema, apply as applyGitee, giteeKind, pollFailure, pollRound } from '../src/sources/gitee.ts'
 import { settingsView } from '../src/app/views/settings.ts'
-import { commentTrigger, giteeFind, issueTrigger, type GiteeComment, type GiteeIssue } from '../src/sources/gitee-trigger.ts'
+import { commentTrigger, giteeFind, issueTrigger, pullTrigger, type GiteeComment, type GiteeIssue, type GiteePull } from '../src/sources/gitee-trigger.ts'
 import { giteeLink, markerOf, sendGitee } from '../src/sources/gitee-channel.ts'
+import { giteePull, giteePullRequest } from '../src/sources/gitee-pull.ts'
+import { pullEndNotices, pullOf } from '../src/sources/pull.ts'
 import { testDeployment, testMachine } from './fixtures/deployment.ts'
 
 const boards = new WeakMap<SourceRegistry, HealthBoard>()
@@ -71,7 +74,7 @@ const refused = (status: number, text: string) => commandError({ stderr: `HTTP $
 /** Stubs `gitee-cli api` reads against `acme/widgets` and records the requested paths and posted bodies. */
 function gitee(h: ReturnType<typeof host>, routes: Record<string, unknown>) {
   const calls: { method: string; path: string; body?: string }[] = []
-  vi.spyOn(h.commands, 'run').mockImplementation(async (_program, args) => {
+  vi.spyOn(Commands.prototype, 'run').mockImplementation(async (_program, args) => {
     const method = args.includes('POST') ? 'POST' : 'GET'
     const path = args[1]!
     const body = args.find(item => item.startsWith('body='))?.slice(5)
@@ -95,6 +98,14 @@ const comment = (id: number, fields: Partial<GiteeComment> = {}): GiteeComment =
 const message = (id = 'm1'): OutboundMessage => ({ id, text: 'Done', kind: 'reply',
   channel: { source: 'gitee', thread: 'gitee:issue:IKSRCD', address: { hostname: 'gitee.com', repository: 'acme/widgets',
     kind: 'issue', number: 'IKSRCD' } } })
+const pr = (number: number, fields: Partial<GiteePull> = {}): GiteePull => ({ number, title: `PR ${number}`, body: '',
+  user: { login: 'alice' }, created_at: '2026-09-09T00:00:00Z', updated_at: '2026-09-09T00:00:00Z',
+  html_url: `https://gitee.com/acme/widgets/pulls/${number}`, state: 'open', head: `agent/pr-${number}`, ...fields })
+const openTicket = (id: string, name: string, origin = `source-${id}`, fields: Partial<Ticket> = {}): Ticket => ({ id, title: id,
+  decisionId: `d-${id}`, mandate: { strength: 'explicit', policyVersion: '', basis: { via: 'listed' }, actor: { source: 'gitee', id: 'alice' }, scope: '' },
+  channels: [], assignments: [{ id: `a-${id}`, state: 'running', createdAt: '2026-09-01T00:00:00Z' }], inputs: [], undelivered: [],
+  createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-01T00:00:00Z', origin: { triggerId: origin, triggerIds: [origin] },
+  execution: { name, directory: `/w/${name}`, assignment: '' }, ...fields })
 
 describe('gitee configuration', () => {
   it('fills defaults that receive nothing, and lists the fields and admission rows', () => {
@@ -254,6 +265,84 @@ describe('gitee polling', () => {
       for (const dispose of disposers) await dispose()
       run.mockRestore()
     } finally { vi.useRealTimers() }
+  })
+})
+
+describe('gitee pull requests', () => {
+  const normalized = (h: ReturnType<typeof host>, item: GiteePull) => giteePull(item, h.deployment.gitee!)
+  it('binds the source PR and an agent PR on the ticket branch, and refuses another ticket\'s PR', () => {
+    const h = host()
+    expect(h.sources.pullRequests('gitee')).toBe(giteePullRequest)
+    expect(giteePullRequest.number('gitee:pr:30')).toBe(30)
+    expect(giteePullRequest.number('gitee:issue:IKSRCD')).toBeUndefined()
+    const source = pullTrigger(pr(30), 'agent-bot', 'gitee.com', 'acme/widgets')
+    h.store.triggers.save(source)
+    h.store.tickets.save(openTicket('t1', 'fix-1', source.id))
+    expect(giteePullRequest.claim(h, 't1', normalized(h, pr(30)))).toBeUndefined()
+    expect(h.store.tickets.get('t1')!.follows).toEqual([{ thread: 'gitee:pr:30', own: false }])
+    expect(h.store.threads.get('gitee:pr:30')).toMatchObject({ subscriptions: ['t1'], meta: { number: 30, isPr: true, prAuthor: 'alice' } })
+    // Only a PR by the agent account, in the configured repository, from the ticket's branch binds.
+    expect(giteePullRequest.claim(h, 't1', normalized(h, pr(31, { head: 'agent/fix-1' })))).toContain('PR does not belong to this ticket')
+    expect(giteePullRequest.claim(h, 't1', normalized(h, pr(32, { user: { login: 'agent-bot' }, head: 'agent/fix-1' })))).toBeUndefined()
+    expect(pullOf(h.store.tickets.get('t1')!)).toEqual({ source: 'gitee', number: 32 })
+    // A closed PR is not bound, but that is no refusal.
+    expect(giteePullRequest.claim(h, 't1', normalized(h, pr(33, { user: { login: 'agent-bot' }, head: 'agent/fix-1', state: 'closed' })))).toBeUndefined()
+    expect(pullOf(h.store.tickets.get('t1')!)).toEqual({ source: 'gitee', number: 32 })
+    // Another ticket already follows #34.
+    h.store.tickets.save(openTicket('t2', 'fix-2', 'source-t2', { follows: [{ thread: 'gitee:pr:34', own: true }] }))
+    h.store.tickets.save(openTicket('t3', 'fix-3'))
+    expect(giteePullRequest.claim(h, 't3', normalized(h, pr(34, { user: { login: 'agent-bot' }, head: 'agent/fix-3' }))))
+      .toBe('PR already belongs to another active ticket')
+  })
+  it('ends a ticket when the PR it follows merges or closes without merging', async () => {
+    const h = host()
+    const mergedAt = '2026-09-09T01:00:00Z'
+    h.store.tickets.save(openTicket('t1', 'fix-1', 'source-t1', { follows: [{ thread: 'gitee:pr:50', own: true }] }))
+    expect(await giteePullRequest.observe(h, normalized(h, pr(50, { state: 'closed', merged_at: mergedAt })))).toBe(true)
+    expect(h.store.tickets.get('t1')).toMatchObject({ ended: { outcome: 'merged', at: new Date(mergedAt).toISOString() } })
+    expect(h.store.threads.get('gitee:pr:50')).toBeUndefined()
+    const closedAt = '2026-09-09T02:00:00Z'
+    h.store.tickets.save(openTicket('t2', 'fix-2', 'source-t2', { follows: [{ thread: 'gitee:pr:51', own: true }] }))
+    expect(await giteePullRequest.observe(h, normalized(h, pr(51, { state: 'closed', closed_at: closedAt })))).toBe(true)
+    expect(h.store.tickets.get('t2')).toMatchObject({ ended: { outcome: 'closed', at: new Date(closedAt).toISOString() } })
+  })
+  it('sends an ended ticket\'s notice only to channels other than Gitee, with the Gitee page', () => {
+    const h = host()
+    const at = '2026-09-09T01:00:00Z'
+    const giteeChannel = { source: 'gitee', thread: 'gitee:pr:60', address: { hostname: 'gitee.com',
+      repository: 'acme/widgets', kind: 'pr', number: '60' } }
+    const feishuChannel = { source: 'feishu', thread: 'feishu:oc_team', address: { chatId: 'oc_team', messageId: 'om_1' } }
+    const ticket = openTicket('t1', 'fix-1', 'source-t1', { ended: { at, by: 'executor', outcome: 'merged' }, channels: [giteeChannel, feishuChannel],
+      follows: [{ thread: 'gitee:pr:60', own: true, closed: { at, outcome: 'merged' } }] })
+    h.store.tickets.save(ticket)
+    const notices = pullEndNotices(h.sources, ticket, '请修一下标题', h.deployment)
+    expect(notices).toEqual([expect.objectContaining({ kind: 'notice', channel: feishuChannel,
+      text: '[PR #60](https://gitee.com/acme/widgets/pulls/60) 已合并。' })])
+    // A ticket whose only channel is Gitee gets no terminal notice.
+    h.store.tickets.save({ ...ticket, channels: [giteeChannel] })
+    expect(pullEndNotices(h.sources, h.store.tickets.get('t1')!, '请修一下标题', h.deployment)).toEqual([])
+  })
+  it('reports a Gitee ticket\'s PR on Gitee and refuses instead of falling back to GitHub', async () => {
+    const h = host()
+    const calls = gitee(h, { 'pulls/42': pr(42) })
+    const source = pullTrigger(pr(42), 'agent-bot', 'gitee.com', 'acme/widgets')
+    h.store.triggers.save(source)
+    h.store.tickets.save(openTicket('t1', 'fix-1', source.id))
+    const context = (source: string) => source === 'gitee' ? h : undefined
+    const base = { engine: h.engine, store: h.store, sessions: { relay: vi.fn(), notify: vi.fn() }, resources: {} as never,
+      sources: h.sources, sourceContext: context, sendReplies: async () => {} }
+    const report = (host: typeof base, ticket: Ticket) => executorTools(host as never, ticket).find(tool => tool.name === 'orchestrator_report')!
+    await report(base, h.store.tickets.get('t1')!).execute({ state: 'progress', summary: 'pr open', pr_number: 42 } as never, new AbortController().signal)
+    expect(calls).toContainEqual(expect.objectContaining({ path: '/repos/acme/widgets/pulls/42' }))
+    expect(h.store.tickets.get('t1')!.follows).toEqual([{ thread: 'gitee:pr:42', own: false }])
+    // Without Gitee's pull request rules the ticket fails; it never reads the same number on GitHub.
+    const other = pullTrigger(pr(43), 'agent-bot', 'gitee.com', 'acme/widgets')
+    h.store.triggers.save(other)
+    h.store.tickets.save(openTicket('t2', 'fix-2', other.id))
+    const missing = { ...base, sources: { pullRequests: () => undefined }, sourceContext: () => undefined } as unknown as typeof base
+    await expect(report(missing, h.store.tickets.get('t2')!).execute({ state: 'progress', summary: 'pr open', pr_number: 43 } as never,
+      new AbortController().signal)).rejects.toThrow('The gitee Source has no pull request support')
+    expect(calls.some(call => call.path.includes('/pulls/43'))).toBe(false)
   })
 })
 

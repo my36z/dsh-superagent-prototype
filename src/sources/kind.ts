@@ -1,7 +1,7 @@
 /** SourceKind plugin contract: configuration schema, UI form fields, policy integration, channel adapter, and thread context reader. */
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { z } from 'zod'
-import type { OutboundMessage, ScopeResult, Trigger } from '../core/index.ts'
+import type { OutboundMessage, ScopeResult, Ticket, Trigger } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { SourceContext, SourceHost } from './host.ts'
@@ -54,6 +54,45 @@ export interface SourceChannel<C> {
   /** Returns the URL and label for `address`; `url` is empty when `links` lack the required deployment info. */
   link(address: Record<string, string>, links: ChannelLinks): ChannelLink
 }
+/**
+ * A pull request normalized across Sources: its number, state, merge time, head branch, author, and page URL.
+ * `headRepository` and `headSha` exist only where the Source reports them, so a GitHub fork can be refused while Gitee,
+ * which names only a branch, binds by author, configured repository, and branch.
+ */
+export interface PullRequest {
+  number: number
+  state: string
+  /** True once the pull request merged; Gitee reports this through `merged_at`, GitHub through `merged`. */
+  merged: boolean
+  mergedAt?: string | undefined
+  closedAt?: string | undefined
+  htmlUrl: string
+  /** Head branch name. */
+  head: string
+  /** Login of the pull request author. */
+  author: string
+  /** Full name of the repository the pull request belongs to, which binding must match when the Source reports it. */
+  repository?: string | undefined
+  /** Full name of the repository the head branch lives in when the Source reports one (GitHub). */
+  headRepository?: string | undefined
+  /** Head commit when the Source reports one (GitHub). */
+  headSha?: string | undefined
+  /** Whether the Source reports auto-merge enabled (GitHub), shown as a Thread fact. */
+  autoMerge?: boolean | undefined
+}
+/** A Source's pull request capability: binding a ticket, reading and observing a pull request, and the notice its end sends. */
+export interface PullRequestKind {
+  /** The number in a pull request Thread of this Source (`github:12`, `gitee:pr:12`), or undefined for another Thread. */
+  number(thread: string): number | undefined
+  /** Reads and normalizes one pull request. */
+  read(commands: Commands, deployment: Deployment, number: number, signal?: AbortSignal): Promise<PullRequest>
+  /** Binds the pull request to the ticket, or returns why it does not belong; undefined when bound or not open. */
+  claim(ctx: SourceContext, ticketId: string, pr: PullRequest): string | undefined
+  /** Reconciles an open, merged, or closed pull request with the tickets that follow it; returns whether it ended. */
+  observe(ctx: SourceContext, pr: PullRequest): Promise<boolean>
+  /** The notice a ticket's end sends to its channels other than this Source's. */
+  notices(ticket: Ticket, request: string, deployment: Deployment): OutboundMessage[]
+}
 /** Normalized message returned by thread context readers; `bot` marks a non-human sender whose message can never authorize work on its own (at most an inferred candidate). */
 export interface ContextMessage {
   id: string; from: string; at: string; text: string
@@ -100,6 +139,8 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   channel?: SourceChannel<C>
   /** Bounded context reader for assessments; assessments of a kind without `threadContext` read none. */
   threadContext?: ThreadContext<C>
+  /** Pull request rules; a kind without it cannot deliver or bind a pull request. */
+  pullRequest?: PullRequestKind
   /** Maps a search query to candidate Thread keys (such as `github:12`) and Trigger search terms (such as a Feishu `om_` ID). */
   find?(query: string): { threads: string[]; terms: string[] }
   /** Returns the ID of the Trigger whose message this Trigger replies to, when derivable without a network read. */

@@ -3,7 +3,7 @@ import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger } f
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
 import { AdmissionTableSchema, type Settings } from '../policy.ts'
-import type { ChannelLink, ChannelLinks, SourceInstance, SourceKind, TriggerContext, VariableSpec } from './kind.ts'
+import type { ChannelLink, ChannelLinks, PullRequestKind, SourceInstance, SourceKind, TriggerContext, VariableSpec } from './kind.ts'
 
 
 /**
@@ -72,6 +72,8 @@ export class SourceRegistry implements SourceScope {
     const parsed = policy.schema.safeParse(rest)
     return { ...parsed.success ? parsed.data : policy.schema.parse({}), admission: AdmissionTableSchema.safeParse(admission ?? {}).data ?? {} }
   }
+  /** The pull request rules of the installed kind `source`, or undefined when it has none. */
+  pullRequests(source: string): PullRequestKind | undefined { return this.kinds.get(source)?.pullRequest }
   channelAllowed(channel: { source: string; address: Record<string, string> }, settings = this.settings()): boolean {
     const kind = this.kinds.get(channel.source)
     if (!kind) return false

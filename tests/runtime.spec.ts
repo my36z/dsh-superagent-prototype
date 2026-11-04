@@ -27,7 +27,8 @@ import { feishuTrigger } from '../src/sources/feishu.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { commentTrigger, githubChannel } from '../src/sources/github-trigger.ts'
 import { IM_WORDS } from '../src/infra/text.ts'
-import { observePull, pullOf } from '../src/sources/github-pull.ts'
+import { observePull } from '../src/sources/github-pull.ts'
+import { pullOf } from '../src/sources/pull.ts'
 import { credentialHelper, workerGitConfig } from '../src/infra/environment.ts'
 import { policyHistory } from '../src/app/settings-history.ts'
 import { overview } from '../src/app/views/overview.ts'
@@ -329,7 +330,7 @@ it('records worker reports, binds the task PR, ends the ticket on ready without 
   expect(await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'Desktop too?', text: '要不要也改桌面端？' })).toEqual({ status: 'sent' })
   await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'pr open', pr_number: 42, human_action: null })
   const bound = runtime.store.tickets.get(ticket.id)!
-  expect(pullOf(bound)).toBe(42)
+  expect(pullOf(bound)?.number).toBe(42)
   expect(bound.attention).toBeUndefined()
   expect(runtime.store.threads.get('github:42')?.subscriptions).toEqual([ticket.id])
   await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'reviewed' })

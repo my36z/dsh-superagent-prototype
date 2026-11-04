@@ -116,7 +116,7 @@ The core's codes, such as `timeout`, `policyChanged`, `routed` and `startedTicke
 
 A Ticket keeps each fact once. It is open while it has no `ended`, which records when, by whom, why and with what outcome it ended; what it last said is its latest Assignment Report (`latestReport`); and its Executor Session is named after it (`workerSessionId` in `src/executor/dsh.ts`).
 
-Its fields are typed: `origin`, the admissible Trigger that gave its Eval's batch its strength and the batch itself (`triggerId`, `triggerIds`); `execution`, what the Executor chose (`name`, `directory` and `assignment`); `delivery`, the last failed Input delivery (`error`, `at`), until a delivery succeeds, a new Assignment starts or the Ticket ends; and `follows`, the Threads a Source made it follow, each `{thread, own, closed?}`: `own` when the Ticket opened it, and `closed` with `at` and `outcome` once it closed. Tickets alone writes `follows`; the GitHub Source reads its pull requests with `pullsOf` and `pullOf` (`src/sources/github-pull.ts`).
+Its fields are typed: `origin`, the admissible Trigger that gave its Eval's batch its strength and the batch itself (`triggerId`, `triggerIds`); `execution`, what the Executor chose (`name`, `directory` and `assignment`); `delivery`, the last failed Input delivery (`error`, `at`), until a delivery succeeds, a new Assignment starts or the Ticket ends; and `follows`, the Threads a Source made it follow, each `{thread, own, closed?}`: `own` when the Ticket opened it, and `closed` with `at` and `outcome` once it closed. Tickets alone writes `follows`; the Sources read their pull requests through their `pullRequest` capability, and `pullOf` (`src/sources/pull.ts`) names the Source and number of the one a Ticket follows.
 
 An Input that carries a Trigger records whether a person wrote it, which `waitsForPerson` reads. A Thread also lists in `context` the subscribed Tickets that follow it only for context, and counts in `expired` the Evals of its queued Triggers that expired in a row; an Evaluation records its `primary` Trigger and when its candidate was `delivered`.
 
@@ -278,9 +278,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 - Outbox applies the Feishu chat word limit.
 - `src/app/links.ts` resolves Feishu message links and `repliedTo`. It and Runtime read settings with `feishuSettings`.
-- `src/app/resources.ts` reads the `feishu/` and `github/` originals; `src/app/cards.ts` uses `pullOf` for Ticket cards.
-- Runtime sends `pullEndNotices` for merged or closed Tickets.
-- Executor tools bind reported pull requests with `readPull` and `claimPull`, using the GitHub context exposed by Runtime.
+- `src/app/resources.ts` reads the `feishu/` and `github/` originals; `src/app/cards.ts` uses `pullOf` for Ticket cards, naming the Source when it is not GitHub.
+- Runtime sends `pullEndNotices` for merged or closed Tickets, dispatching to the Source of the pull request that ended.
+- Executor tools bind reported pull requests through the Ticket's Source `pullRequest` capability, never assuming GitHub.
 - MasterAssessor reads repository files with `readRepositoryPath`.
 - Sessions and Prompts register built-in skills only for GitHub and Feishu. Migration converts their schema-10 records.
 - Setup probes the GitHub, Gitee and Feishu account fields (`SETUP_FIELDS`). Each of those Sources receives its own account setup problem through `SourceContext.problem`; only the GitHub one stops all Sources.
@@ -362,14 +362,16 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/registry.ts` | `SourceRegistry` |
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |
 | `src/sources/poll.ts` | What GitHub, Gitee and Feishu polling share: `POLL_HORIZON_MS`, `polled`, `cursorAt`, and `pollThreads`, which keeps a failure on its Thread as `pollError` |
+| `src/sources/pull.ts` | What the Sources' pull request rules share: `PullRef`, `pullOf`, `ticketBranch`, `latestPullEnd`, and `pullEndNotices`, which dispatches a Ticket's merged or closed notice to the Source of the PR that ended |
 | `src/sources/github.ts` | The GitHub kind and plugin entry, exported as `./github-watch`: a poll round of notifications, the pull requests of open Tickets with their CI, and subscribed Threads |
 | `src/sources/github-trigger.ts` | GitHub comments, reviews, Issue bodies and CI changes as Triggers, and GitHub addresses |
-| `src/sources/github-pull.ts` | The pull request rules: which pull requests a Ticket follows (`claimPull`, `observePull`), the closes it reports to the Engine, and `pullEndNotices`, the chat notice of a Ticket that ended merged or closed |
+| `src/sources/github-pull.ts` | The GitHub pull request capability: `githubPullRequest`, which reads and normalizes a PR, binds the source PR or an agent PR on the Ticket's branch (`claimPull`), observes its merge or close (`observePull`), and builds its end notice |
 | `src/sources/github-channel.ts` | The GitHub Channel: comments and review thread replies, `sent` or `gone` |
 | `src/sources/github-read.ts` | CI snapshots, repository reads, the `github/` resources, and `githubThreadContext`: an Issue's or pull request's conversation by page |
-| `src/sources/gitee.ts` | The Gitee kind and plugin entry, exported as `./gitee-watch`: a poll round of the Issue, pull request and Issue comment streams, pull request comments and subscribed Threads |
+| `src/sources/gitee.ts` | The Gitee kind and plugin entry, exported as `./gitee-watch`: a poll round of the Issue, pull request and Issue comment streams, the pull requests of open Tickets, pull request comments and subscribed Threads |
 | `src/sources/gitee-trigger.ts` | Gitee Issues, pull requests and comments as Triggers, with `gitee:issue:<number>` and `gitee:pr:<number>` Threads and their addresses |
 | `src/sources/gitee-channel.ts` | The Gitee Channel: top-level Issue and pull request comments with an idempotence marker, `sent` or `gone` |
+| `src/sources/gitee-pull.ts` | The Gitee pull request capability: `giteePullRequest`, which reads a PR through `gitee-cli`, binds by author, repository and branch, observes `state` and `merged_at`, and builds its end notice |
 | `src/sources/gitee-read.ts` | Reads through `gitee-cli`, pagination, the Gitee parent comment, and `giteeThreadContext`: a Thread's comments, its root and the comment it answers |
 | `src/sources/feishu.ts` | The Feishu kind and plugin entry, exported as `./feishu-watch` |
 | `src/sources/feishu-trigger.ts` | Feishu messages as Triggers, by one rule for live events, history pages and topic pages |
@@ -412,7 +414,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
-| `tests/gitee.spec.ts` | The Gitee Source on a `SourceContext`: configuration and admission rows, setup checks, poll streams and read positions, health, the Channel and Thread context |
+| `tests/gitee.spec.ts` | The Gitee Source on a `SourceContext`: configuration and admission rows, setup checks, poll streams and read positions, health, the Channel and Thread context, pull request binding, observation and terminal notices, and the Executor's report resolving a Gitee PR |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |

@@ -47,7 +47,7 @@ export type GiteeIssue = z.infer<typeof GiteeIssueSchema>
 export const GiteePullSchema = z.looseObject({
   number: z.number(), title: z.string(), body: z.string().nullish(), user: GiteeUserSchema,
   created_at: z.string(), updated_at: z.string().nullish(), html_url: z.string().nullish(), state: z.string().nullish(),
-  merged_at: z.string().nullish(), head: z.unknown().nullish(), base: z.unknown().nullish(),
+  merged_at: z.string().nullish(), closed_at: z.string().nullish(), head: z.unknown().nullish(), base: z.unknown().nullish(),
 })
 export type GiteePull = z.infer<typeof GiteePullSchema>
 interface Opened {
