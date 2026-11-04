@@ -9,7 +9,7 @@ import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddres
   from './github-trigger.ts'
 import { githubLink, sendGithub } from './github-channel.ts'
 import type { GithubComment, PullRef } from './github-trigger.ts'
-import { observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
+import { githubPullRequest, observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
 import { health, sourceContext, type Health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
 import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach } from './poll.ts'
@@ -63,6 +63,7 @@ export const githubKind: SourceKind<GithubConfig> = {
   health: ['github'],
   channel: { send: sendGithub, link: githubLink },
   threadContext: githubThreadContext,
+  pullRequest: githubPullRequest,
   // `#12`, `12`, or the page of an Issue or PR, of any repository, names Thread 12.
   find: query => {
     const number = (/^#?(\d+)$/.exec(query.trim()) ?? /github\.com\/[^/]+\/[^/]+\/(?:pull|issues)\/(\d+)/.exec(query))?.[1]
@@ -376,7 +377,7 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
 function pull(ctx: SourceContext, round: Round, number: number): Promise<Pull> {
   let read = round.pulls.get(number)
   if (!read) {
-    read = readPull(ctx, number, round.signal).then(async pr => { await observePull(ctx, pr); return pr })
+    read = readPull(ctx.commands, number, round.signal).then(async pr => { await observePull(ctx, pr); return pr })
     round.pulls.set(number, read)
   }
   return read

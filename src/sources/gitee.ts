@@ -12,6 +12,8 @@ import { commentTrigger, giteeFind, giteeThreadKey, issueTrigger, pullTrigger, S
   GiteeCommentSchema, GiteeIssueSchema, GiteePullSchema } from './gitee-trigger.ts'
 import { giteePages, giteeResource, giteeThreadContext, parseThread } from './gitee-read.ts'
 import { giteeLink, sendGitee } from './gitee-channel.ts'
+import { giteePull, giteePullRequest } from './gitee-pull.ts'
+import { pullRefs } from './pull.ts'
 
 export const GiteeConfigSchema = GiteeAccountsSchema.extend({
   pollSeconds: z.number().int().min(60).max(3600).default(60),
@@ -73,6 +75,7 @@ export const giteeKind: SourceKind<GiteeConfig> = {
     link: giteeLink,
   },
   threadContext: giteeThreadContext,
+  pullRequest: giteePullRequest,
   find: giteeFind,
   policy: {
     schema: z.object({
@@ -180,9 +183,10 @@ const STREAMS: readonly Stream[] = [
   { id: 'issue-comments', path: 'issues/comments', query: { sort: 'updated', direction: 'asc' } },
 ]
 /**
- * One polling round: the repository streams, then pull request comments of the pull requests this round returned or of open
- * Tickets, then subscribed Threads. A failed stream or Thread is recorded and the others still run; the round then fails so
- * consecutive failures reach the health threshold. Cursors move only after every Trigger of a stream was received.
+ * One polling round: the repository streams, then the pull requests of open Tickets, then pull request comments of the
+ * pull requests this round returned or of open Tickets, then subscribed Threads. A failed stream or Thread is recorded and
+ * the others still run; the round then fails so consecutive failures reach the health threshold. Cursors move only after
+ * every Trigger of a stream was received.
  */
 export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promise<void> {
   const round = newRound(signal)
@@ -191,6 +195,7 @@ export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promi
     try { await readStream(ctx, round, stream) }
     catch (error) { if (!stopped(ctx, round)) round.failures.push(`${stream.id}: ${String(error)}`) }
   }
+  await pollTicketPulls(ctx, round)
   await pollPullComments(ctx, round)
   await pollThreads(ctx, signal, round)
   if (round.failures.length) throw new Error(`${round.failures.length} Gitee reads failed: ${round.failures.slice(0, 3).join('; ')}`)
@@ -235,6 +240,7 @@ async function readStream(ctx: SourceContext, round: Round, stream: Stream): Pro
       touch(pull.data.updated_at ?? pull.data.created_at)
       // Every pull request this round reports is read for comments, including one older than the cursor that just changed.
       round.pulls.add(pull.data.number)
+      await giteePullRequest.observe(ctx, giteePull(pull.data, gitee))
       if (sameName(pull.data.user.login, gitee.login)) continue
       const born = Date.parse(pull.data.created_at)
       if (!Number.isFinite(born) || born < Date.parse(since)) continue
@@ -264,6 +270,19 @@ async function readStream(ctx: SourceContext, round: Round, stream: Stream): Pro
   // Hitting the page limit stops at the last item read, so the next round continues after it instead of skipping unread items.
   const next = truncated && last ? cursorAt(last) : cursorAt(round.started)
   ctx.state.set(name, { since: Date.parse(next) > Date.parse(since) ? next : since, started: stored?.started ?? { [stream.id]: round.started } })
+}
+/** Reads and observes the pull requests open Tickets follow, unless the pull stream already reported them this round. */
+async function pollTicketPulls(ctx: SourceContext, round: Round): Promise<void> {
+  const numbers = new Set<number>()
+  for (const ticket of ctx.tickets.open()) for (const ref of pullRefs(ticket, true)) if (ref.source === SOURCE) numbers.add(ref.number)
+  for (const number of numbers) {
+    if (stopped(ctx, round)) return
+    if (round.pulls.has(number)) continue
+    try {
+      const pr = await giteePullRequest.read(ctx.commands.withSignal(round.signal), ctx.deployment, number, round.signal)
+      await giteePullRequest.observe(ctx, pr)
+    } catch (error) { if (!stopped(ctx, round)) round.failures.push(`pulls/${number}: ${String(error)}`) }
+  }
 }
 /** Reads the comments of the pull requests this round reported and of pull requests open Tickets follow, each after its own cursor. */
 async function pollPullComments(ctx: SourceContext, round: Round): Promise<void> {

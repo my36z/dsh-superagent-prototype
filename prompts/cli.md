@@ -5,6 +5,7 @@ It leaves other context reads and local downloads to workers, routes tickets and
 Do not alter remote state, authorization, or configuration while reading.
 Use gh for every GitHub call; specify --repo or an explicit API path.
 The watcher remains limited to the deployment's repository; linked context may be read elsewhere.
+When `DSH_SUPERAGENT_GITEE_REPOSITORY` is non-empty, use `gitee-cli` for Gitee reads and delivery (`gitee-cli api`, `gitee-cli pr view`); `gh` cannot read that repository.
 Feishu uses --as bot; unavailable content does not authorize switching to the user's identity.
 Start with lark-cli <domain> --help, schema <service.resource.method>, or skills read lark-im.
 Follow root_id, parent_id, thread_id, forwarded message IDs and document URLs recursively as relevant, tracking visited IDs.

@@ -5,8 +5,9 @@ import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, fe
 import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
 import { runFeishu } from '../src/sources/feishu-loops.ts'
-import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
-import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
+import { commentTrigger, githubAddress, githubChannel, githubPage, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
+import { claimPull, observePull, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
+import { pullEndNoticesFor, pullOf } from '../src/sources/pull.ts'
 import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
 import { apply as applyGithub, githubKind, pollFailure, pollRound } from '../src/sources/github.ts'
 import { pollThreads as pollGithubThreads } from '../src/sources/github.ts'
@@ -68,6 +69,8 @@ const agentsPull = (number: number, ref: string): Pull =>
 const openPull = (number: number) => ({ number, title: 'Fix the margin', state: 'open',
   html_url: `https://github.com/acme/widgets/pull/${number}`, user: { login: 'carol' },
   head: { sha: 'abc', ref: 'fix', repo: { full_name: 'acme/widgets' } } })
+const pullEndNotices = (ticket: Ticket, request: string) => pullEndNoticesFor('github', ticket, request,
+  number => githubPage('acme/widgets', number, true))
 const notification = (number: number, kind: 'issues' | 'pulls' = 'issues') => ({ id: `n${number}`, updated_at: '2026-09-09T00:00:00Z',
   reason: 'mention',
   repository: { full_name: 'acme/widgets' }, subject: { url: `https://api.github.com/repos/acme/widgets/${kind}/${number}`,
@@ -409,16 +412,16 @@ describe('github source', () => {
     const agentsPull = (number: number): Pull => ({ ...openPull(number), user: { login: 'agent-bot' }, head: { sha: 'abc',
       ref: 'agent/one', repo: { full_name: 'acme/widgets' } } })
     await observePull(h, agentsPull(9))
-    expect(pullOf(h.store.tickets.get('t1')!)).toBe(9)
+    expect(pullOf(h.store.tickets.get('t1')!)?.number).toBe(9)
     expect(h.store.threads.get('github:9')?.subscriptions).toEqual(['t1'])
     // A ticket that follows a PR moves to another only by its Executor's report.
     await observePull(h, agentsPull(10))
-    expect(pullOf(h.store.tickets.get('t1')!)).toBe(9)
+    expect(pullOf(h.store.tickets.get('t1')!)?.number).toBe(9)
     expect(await observePull(h, endedPull(9, '2026-09-02T00:00:00Z'))).toBe(true)
     expect(h.store.tickets.get('t1')).toMatchObject({ ended: { by: 'executor', outcome: 'merged', at: '2026-09-02T00:00:00.000Z' } })
     expect(h.store.threads.get('github:9')?.subscriptions).toEqual(['t1'])
     // The notice its end gives follows the language of the source request.
-    const notices = pullEndNotices(h.store.tickets.get('t1')!, request.text, 'acme/widgets')
+    const notices = pullEndNotices(h.store.tickets.get('t1')!, request.text)
     expect(notices).toEqual([expect.objectContaining({ kind: 'notice', channel: expect.objectContaining({ source: 'feishu' }), text: expect.stringContaining('已合并') })])
     expect(h.executor.stop).toHaveBeenCalledOnce()
     // Resumed after the merge, the ticket works on: a later look at the merged PR reports nothing again.
@@ -430,7 +433,7 @@ describe('github source', () => {
     expect(h.store.tickets.get('t1')).toMatchObject({ ended: { outcome: 'merged' } })
     expect(Date.parse(h.store.tickets.get('t1')!.ended!.at)).toBeGreaterThan(Date.parse('2026-09-03T00:00:00Z'))
     // Its notice has the id of the first one, so it goes out once.
-    expect(pullEndNotices(h.store.tickets.get('t1')!, request.text, 'acme/widgets').map(notice => notice.id)).toEqual(notices.map(notice => notice.id))
+    expect(pullEndNotices(h.store.tickets.get('t1')!, request.text).map(notice => notice.id)).toEqual(notices.map(notice => notice.id))
     h.store.close()
   })
   it('keeps a ticket working on its other open PR when one of its PRs merges', async () => {
@@ -442,7 +445,7 @@ describe('github source', () => {
     expect(h.store.tickets.get('t3')).toMatchObject({ follows: [{ thread: 'github:21', own: true },
       { thread: 'github:22', own: true, closed: { at: '2026-09-02T00:00:00.000Z', outcome: 'merged' } }] })
     expect(h.store.tickets.get('t3')).not.toHaveProperty('ended')
-    expect(pullOf(h.store.tickets.get('t3')!)).toBe(21)
+    expect(pullOf(h.store.tickets.get('t3')!)?.number).toBe(21)
     expect(h.executor.stop).not.toHaveBeenCalled()
     expect(await observePull(h, endedPull(21, '2026-09-03T00:00:00Z'))).toBe(true)
     expect(h.store.tickets.get('t3')).toMatchObject({ ended: { outcome: 'merged', at: '2026-09-03T00:00:00.000Z' } })
@@ -473,7 +476,7 @@ describe('github source', () => {
     h.store.triggers.save(request)
     h.store.tickets.save({ id: 't2', title: 'two', decisionId: 'd2', mandate: { strength: 'explicit', policyVersion: '', basis: { via: 'listed' }, actor: { source: 'feishu', id: MEMBER }, scope: '' }, channels: [{ source: 'feishu', thread: 'feishu:oc_1', address: { chatId: 'oc_1', messageId: 'om_2' } }], assignments: [], inputs: [], undelivered: [], createdAt: '', updatedAt: '', ...pulled(12), origin: { triggerId: request.id, triggerIds: [request.id] } })
     expect(await observePull(h, endedPull(12, '2026-09-02T00:00:00Z', false))).toBe(true)
-    expect(pullEndNotices(h.store.tickets.get('t2')!, request.text, 'acme/widgets'))
+    expect(pullEndNotices(h.store.tickets.get('t2')!, request.text))
       .toEqual([expect.objectContaining({ text: '[PR #12](https://github.com/acme/widgets/pull/12) was closed without merging.' })])
     h.store.close()
   })
@@ -955,12 +958,12 @@ describe('github source', () => {
     expect(claimPull(h, 't1', agents(41, 'agent/fix-1'))).toBe('PR already belongs to another active ticket')
     // A PR that is not open is not bound, and that is no refusal.
     expect(claimPull(h, 't1', { ...agents(42, 'agent/fix-1'), state: 'closed' })).toBeUndefined()
-    expect(pullOf(h.store.tickets.get('t1')!)).toBeUndefined()
+    expect(pullOf(h.store.tickets.get('t1')!)?.number).toBeUndefined()
     expect(claimPull(h, 't1', openPull(30))).toBeUndefined()
     expect(h.store.tickets.get('t1')!.follows).toEqual([{ thread: 'github:30', own: false }])
     expect(claimPull(h, 't1', agents(43, 'agent/fix-1'))).toBeUndefined()
     expect(h.store.tickets.get('t1')).toMatchObject({ follows: [{ thread: 'github:30', own: false }, { thread: 'github:43', own: true }], channels: [] })
-    expect(pullOf(h.store.tickets.get('t1')!)).toBe(43)
+    expect(pullOf(h.store.tickets.get('t1')!)?.number).toBe(43)
     expect(h.store.threads.get('github:43')).toMatchObject({ subscriptions: ['t1'], meta: { isPr: true, prAuthor: 'agent-bot' } })
     // The PR the ticket started from is not one it opened: when its own PR merges, the ticket ends instead of following it.
     expect(await observePull(h, endedPull(43, '2026-09-02T00:00:00Z'))).toBe(true)

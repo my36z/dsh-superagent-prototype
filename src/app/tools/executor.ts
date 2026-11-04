@@ -2,8 +2,10 @@
 import { z } from 'zod'
 import { liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
 import { IM_WORDS } from '../../infra/text.ts'
-import { claimPull, readPull } from '../../sources/github-pull.ts'
+import type { PullRequest, PullRequestKind } from '../../sources/kind.ts'
+import { pullOf } from '../../sources/pull.ts'
 import type { SourceContext } from '../../sources/host.ts'
+import type { SourceRegistry } from '../../sources/registry.ts'
 import { readResource, type ResourceHost } from '../resources.ts'
 import type { Store } from '../store.ts'
 import { reportRelay, threadFollowedNotice } from '../notices.ts'
@@ -12,12 +14,29 @@ import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 export interface ExecutorToolsHost {
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
-  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'replyStatus' | 'atomic'>
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly resources: ResourceHost
-  /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
-  readonly github: SourceContext
+  /** The installed Source kinds, whose pull request rules decide which PR a ticket can bind. */
+  readonly sources: Pick<SourceRegistry, 'pullRequests'>
+  /** The Source context that owns a ticket's PR, built on demand from that Source's kind. */
+  sourceContext(source: string): SourceContext | undefined
   sendReplies(): Promise<void>
+}
+
+/**
+ * The Source that binds this ticket's pull request: the one it follows, else its origin Source. Feishu tickets, which have
+ * no pull request rules, deliver on GitHub, the deployment's host in this version; every other Source keeps its own name, so
+ * a Gitee ticket cannot silently become a GitHub one.
+ */
+function pullSource(host: ExecutorToolsHost, ticket: Ticket): { capability: PullRequestKind; context: SourceContext } | { error: string } {
+  const followed = pullOf(ticket)
+  const origin = host.store.triggers.get(ticket.origin.triggerId)?.source
+  const source = followed?.source ?? (origin === 'feishu' ? 'github' : origin)
+  const capability = source ? host.sources.pullRequests(source) : undefined
+  const context = source ? host.sourceContext(source) : undefined
+  if (!source || !capability || !context) return { error: `The ${source ?? 'ticket'} Source has no pull request support; report without pr_number` }
+  return { capability, context }
 }
 
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
@@ -79,16 +98,21 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         summary: z.string().min(1),
         human_action: z.string().trim().min(1).max(1000).nullish().describe('One concrete question for a person, also with state=progress; omit to keep the pending one, null to clear it.'),
         question_for_trigger_id: z.string().optional().describe('With human_action: the human message that raised the question, which is asked where that person wrote.'),
-        pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github.deployment.github.login} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`),
+        pr_number: z.number().int().positive().nullish().describe('The ticket\'s PR: its source PR, or one the agent opened from a branch named after this ticket (DSH_SUPERAGENT_NAME); omit when no PR exists.'),
         reply_to_trigger_id: z.string().optional().describe('The explicit human question this report answers; never for ordinary progress.'),
       }).strict(),
       execute: async (args, signal) => {
         const current = host.store.tickets.get(ticketId)
         if (!current || !liveTicket(current)) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
-        const pull = args.pr_number != null ? await readPull(host.github, args.pr_number, signal) : undefined
+        let pull: { capability: PullRequestKind; context: SourceContext; value: PullRequest } | undefined
+        if (args.pr_number != null) {
+          const resolved = pullSource(host, current)
+          if ('error' in resolved) throw new Error(resolved.error)
+          pull = { ...resolved, value: await resolved.capability.read(resolved.context.commands, resolved.context.deployment, args.pr_number, signal) }
+        }
         // Claim the PR, record the report, and queue the relay atomically so a rejected PR claim or invalid report leaves no partial state, and a recorded report always reaches the main Session.
         return host.store.atomic(() => {
-          const refused = pull && claimPull(host.github, ticketId, pull)
+          const refused = pull && pull.capability.claim(pull.context, ticketId, pull.value)
           if (refused) throw new Error(refused)
           const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
