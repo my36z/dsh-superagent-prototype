@@ -6,6 +6,10 @@
       name: dsh-superagent
     - id: dsh-superagent-github
       name: dsh-superagent/github-watch
+    # Optional Gitee Source; enable it in the profile, then set the repository and gitee-cli on the Gitee Source.
+    - id: dsh-superagent-gitee
+      name: dsh-superagent/gitee-watch
+      disabled: true
     # Optional Feishu Source; requires configuring a bot CLI after enabling.
     - id: dsh-superagent-feishu
       name: dsh-superagent/feishu-watch

@@ -49,6 +49,13 @@ export const KV = {
     branchCi: record<{ branch?: string; failures?: string[]; revision: number }>('github-branch-ci'),
     ci: family<{ fingerprint: string; revision: number }, [number: number]>('github-ci:') },
   /**
+   * Gitee Source: per-stream read cursor and the start time each stream was first read, per-PR comment cursors, and per-Thread
+   * comment cursors shared by the subscribed-Thread poll.
+   */
+  gitee: { stream: family<{ since: string; started: Record<string, string> }, [stream: string]>('gitee-stream:'),
+    prComments: family<string, [pr: string]>('gitee-pr-comments:'),
+    cursor: family<string, [kind: string, number: string]>('gitee-cursor:') },
+  /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID
    * to last-seen timestamp; and per-polled-thread seen message IDs and initialization flag.
    */

@@ -64,7 +64,7 @@
 
 - **stdout 只放数据。** 进度、重试、限流、警告一律写 stderr；JSON 的顶层就是 Gitee 的响应体，不额外包一层。
 - **HTTP 失败。** 非 2xx 在 stderr 打印 `{"error":{"code":<HTTP 状态>,"message":"…"}}`，退出码 1；`404`/`410`/`403`/`429` 必须原样保留，来源靠它区分“目标永久消失”和“稍后重试”。
-- **`--include`。** 打印状态行和响应头，空行，再打印响应体；用于读取 Gitee 返回的限流或分页头。Gitee 是否稳定返回这些头待确认，见第 9 节。
+- **`--include`。** 官方 CLI 没有这个 flag（实测 `unknown flag`），包装层也不提供响应头；来源不依赖限流或分页响应头，改用“每轮最多 N 页 + 失败阈值”，见第 9 节。
 - **路径限制。** 包装层不限制仓库；来源层只构造 `/repos/{owner}/{repo}/…` 下的路径，和 `Commands.api` 的 `path()` 限制等价。
 - **凭据不出现。** 包装层不得把 token 放进 argv；`auth status` 不打印 token；日志里不出现 token。Gitee 的 v5 接口把 `access_token` 放在查询参数或表单里，调试日志和错误信息也必须对它脱敏。
 
@@ -109,7 +109,7 @@ Issue 评论的 `Note` 定义里没有文档化的 `html_url`；评论的页面�
 | --- | --- | --- | --- | --- |
 | 新 Issue | `GET /repos/{owner}/{repo}/issues`，`state=open`、`sort=updated`、`direction=asc`、`since` | 标题 + 正文 | `number`、`title`、`body`、`user`、`created_at`、`updated_at`、`html_url` | 只读 `open` 状态；`progressing`、`rejected` 或在两次轮询之间创建又关闭的 Issue 会漏掉，可接受 |
 | 新 PR | `GET /repos/{owner}/{repo}/pulls`，`state=all`、`sort=updated`、`direction=asc`、`since` | 标题 + 正文 | `number`、`title`、`body`、`user`、`created_at`、`updated_at`、`merged_at`、`head`、`base`、`html_url` | `state=all` 在 gitee.com 的 v5 实测可用并包含 `merged`；私有部署若不接受，改为分别读 `open` 与 `closed` |
-| Issue 评论 | `GET /repos/{owner}/{repo}/issues/comments`，`sort=updated`、`direction=asc`、`since` | 评论正文 | `id`、`user`、`body`、`updated_at`、`target.issue.number` | swagger 未展开 `target`，但 gitee.com 的 v5 实际返回 `target.issue.number`；缺失时退回按 Issue 轮询 |
+| Issue 评论 | `GET /repos/{owner}/{repo}/issues/comments`，`sort=updated`、`direction=asc`、`since` | 评论正文 | `id`、`user`、`body`、`updated_at`、`target.issue.number` | gitee.com 的 v5 实测返回 `target.issue.number`（见第 9 节）；缺失时退回按 Issue 轮询 |
 | PR 评论 | `GET /repos/{owner}/{repo}/pulls/{number}/comments` | 评论正文 | `id`、`user`、`body`、`updated_at`、`comment_type`、`path`、`position`、`commit_id`、`in_reply_to_id` | 接口没有 `since`；只对“本轮更新过的 PR”和“已订阅线程的 PR”逐 PR 读；仓库级 Issue 评论流的样本中只含 Issue 评论，若 `target.pull_request` 非空则按 PR 处理 |
 | PR 审查 | `POST /pulls/{n}/review` 只有写接口，没有列出审查的读接口 | — | — | 首版不产生 Trigger；审查接口只表达通过（管理员可强制通过），没有可读的审查正文 |
 | CI | `GET /commits/{ref}/check-runs` 等接口存在 | — | — | Gitee Go 是否写 check-runs 待确认；首版不接收 CI |
@@ -409,43 +409,51 @@ Gitee 有与 GitHub 通知对等的接口：`/notifications/threads` 列出授�
 
 每个阶段都要同步更新 `docs/007-architecture.md` 的模块表和测试表；`tests/docs.spec.ts` 要求模块和测试文件都在表里。阶段 2 起在 `tests/gitee.spec.ts` 里使用真实临时 Store 和 `SourceRegistry`，按 `tests/sources.spec.ts` 的模式，只把 CLI 调用替换成 spy。
 
-## 9. 待确认
+## 9. 已确认与待确认
 
-分三档：9.1 不确认就不写阶段 1 的凭据、setup 和发送代码；9.2 影响阶段 2–3；9.3 可以先按默认行为实现，留到阶段 4 以后。9.1 没有默认值，必须先拿到答案。
+阶段 1–3 的实现以本节为准。2026-11-04 用 `mail36z` 的 PAT 对真实 Gitee API（仓库 `mail36z/gitee-lab`）实测的结论列在 9.1，优先于前文的推测；前文与 9.1 冲突的地方按 9.1 执行。仍未核对的项列在 9.2 和 9.3，并写明当前实现的默认行为。
 
-### 9.1 阶段 1 之前必须拿到答案
+### 9.1 已确认（2026-11-04 实测）
 
-| # | 问题 | 需要的信息 | 不确认的后果 |
-| --- | --- | --- | --- |
-| 1 | PAT 的 scope 名称 | Gitee 个人令牌页面的 scope 列表；至少确认 `projects`、`issues`、`pull_requests`，以及评论所需的 scope（是否为 `notes`） | setup 可能通过但评论/开 PR 失败；无法写凭据和 troubleshooting 文档 |
-| 2 | 官方 CLI 的配置隔离方式 | 官方 CLI 是否支持独立配置目录或环境变量；`auth git-credential` 是否已有等价命令 | 无法保证智能体账号隔离；无法写 worker 的 git 凭据 helper，推送会落到操作者账号或直接失败 |
-| 3 | 仓库权限接口的返回值 | `GET /repos/{o}/{r}/collaborators/{login}/permission` 的实际返回；哪些值表示可写 | setup 无法区分只读和有写权限；要么误放只读 token，要么挡住有效 token |
-| 4 | 幂等标记在 Gitee 上是否可见 | 发一条含 `<!-- dsh-superagent:… -->` 的评论，看 Gitee 网页渲染结果 | 无法确定 Channel 用 HTML 注释还是别的标记；Outbox 重试可能发出重复评论 |
-| 5 | 官方 CLI 的错误与退出码 | 非 2xx 时 stderr 的格式、退出码，是否保留 404/410/403/429 | 包装层无法把 HTTP 状态映射成 `CliError.code`，`gone` 与重试的区分失效 |
+除第 12 条外，来源均为 `mail36z` 的 PAT 对 `mail36z/gitee-lab` 的真实 v5 API 请求。
 
-### 9.2 阶段 2–3 之前
-
-| 问题 | 需要的信息 | 默认行为 |
+| # | 已确认的事实 | 对实现的影响 |
 | --- | --- | --- |
-| PR 评论的类型筛选 | 不传 `comment_type` 时是否同时返回 `pr_comment` 和 `diff_comment` | 先不传；若只返回一种，按两种类型分别读 |
-| PR 评论的排序与更新时间 | `GET /pulls/{n}/comments` 的 `direction` 按创建时间还是更新时间排序；发评论是否更新 PR 的 `updated_at` | 先按 `updated_at` 过滤；阶段 6 用通知补漏 |
-| 私有部署的 Issue 评论 `target` | 私有 Gitee 是否同样返回 `target.issue.number` | 缺失时退回逐 Issue 读评论 |
-| 私有部署的 `state=all` | 私有 Gitee 的 `/pulls` 是否接受 `state=all` 并返回 merged | 不接受时分别读 `open` 与 `closed`；合并以 `merged_at` 为准 |
-| 删除或锁定对象的错误码 | Gitee 对已删除的 Issue/PR 返回 404 还是 410；403 中 locked、无权限和限流的区分 | 404 先重试；只有此前成功读过该对象或响应明确表示不存在时才 `gone` |
-| PR 评论能否在线程内回复 | 用 `POST /pulls/{n}/comments` 试 `in_reply_to_id`、`commit_id`、`path`、`position` 的组合，看网页效果 | 只发顶层 PR 评论；不承诺行内回复 |
-| 代码行评论的 `new_line` | `new_line` 的格式和可靠性；没有它时哪些字段可还原行号 | 没有 `new_line` 就只给 `path`，不给 `line` |
+| 1 | Issue 编号是字符串，真实值是 `IKSRCD` 这种，不是整数 | Thread 写成 `gitee:issue:<number>`；不 `Number()`、不按编号排序 |
+| 2 | 创建 Issue 是 owner 级端点 `POST /repos/{owner}/issues`，仓库名放在 formData 的 `repo` 字段；`POST /repos/{owner}/{repo}/issues` 返回 `404 {"message":"project or enterprise"}` | 读取仍用 `GET /repos/{owner}/{repo}/issues`；本阶段不创建 Issue |
+| 3 | 仓库级 `GET /repos/{owner}/{repo}/issues/comments` 的每条评论带 `target.issue.number`；`target.pull_request` 非空表示属于 PR | 不需要“逐 Issue 读评论”的兜底；PR 评论不挂到 Issue 线程 |
+| 4 | Issue 评论对象没有 `in_reply_to_id`，字段是 `body`、`created_at`、`id`、`source`、`target`、`updated_at`、`user` | Gitee 只有顶层评论，不发线程内回复 |
+| 5 | PR 评论 `GET/POST /repos/{owner}/{repo}/pulls/{number}/comments` 没有 `since`，有 `comment_type`、`direction` 和分页 | 逐 PR 读评论，用每 PR 的 `updated_at` 游标过滤 |
+| 6 | `GET /notifications/threads` 返回 `{"total_count":0,"list":[]}`，支持 `unread`、`participating`、`type`、`since`、`before`、`ids` 和分页 | 阶段 6 才使用通知；阶段 1–3 不读 |
+| 7 | `GET /repos/{owner}/{repo}/collaborators/{username}/permission` 返回**用户对象 + `permission` 字符串**（实测 `write`，仓库属主为 `admin`），不是 `{"permission":{...}}` | setup 读取这个字符串；`write`/`admin` 视为可写，其余视为只读 |
+| 8 | `gitee api` 没有 `--include`（实测 `unknown flag`）；flag 只有 `--body`、`-f`、`-H`、`-X`、`--page`、`--limit`、`--search`、`--hostname`、`-p` | 来源不读限流/分页响应头；每轮最多 10 页，连续失败达到阈值才报错 |
+| 9 | 官方 CLI 的配置隔离只认 `HOME`，`XDG_CONFIG_HOME` 无效；包装脚本 `/home/zoe/.local/bin/gitee-cli`（内部 `HOME=<agent home>` + 代理）已存在 | 来源配置的 `cli` 填这个包装脚本路径；token 不进入 settings、argv 或日志 |
+| 10 | 新建 Gitee 仓库的默认分支是 `master`，不是 `main` | 任何地方都从仓库对象读 `default_branch`，不假设分支名 |
+| 11 | 评论 body 里的 HTML 注释标记 `<!-- dsh-superagent:… -->` 在 API 返回值中原样保留；页面是否隐藏待人工确认 | 幂等标记先按 HTML 注释实现；网页若显示，改成仍可搜索的不可见标记 |
+| 12 | 官方 CLI v0.3.3 的 `auth status --json` 返回 `{"host","name","status","user"}`（没有数字 id）；`GET /user` 可取 `id`；HTTP 错误写 stderr `HTTP 404: {"message":"…"}`，退出码 1 | setup 从 `auth status` 取登录名，状态没给 id 时从 `/user` 取 id；CLI 错误保留 HTTP 状态码，`gone` 与重试据此区分 |
 
-### 9.3 可以留到阶段 4 以后
+### 9.2 仍需确认（不阻塞阶段 1–3）
 
-| 问题 | 需要的信息 | 默认行为 |
+| 问题 | 需要的信息 | 当前默认行为 |
 | --- | --- | --- |
-| Gitee 的机器人标记 | `GET /user` 的 `type`/`bot_info`、Gitee Go 等自动账号的登录名规则 | 全部按人处理；策略 `bots` 名单只对已标成 `human:false` 的 Trigger 生效，不要把自动化账号加入 `allowed` |
+| PAT 的 scope 名称 | Gitee 个人令牌页面的 scope 列表；至少确认 `projects`、`issues`、`pull_requests`，以及评论所需的 scope（是否为 `notes`） | setup 只验证仓库可读和可写；文档写明所需权限，不按 scope 名称判定 |
+| 403 中 locked、无权限和限流的区分；删除对象返回 404 还是 410 | 已删除/锁定 Issue/PR 的真实响应，以及 429 的形态 | 404/410 和 403+locked 视为 `gone`；其他 403、429、5xx 与网络错误抛出重试 |
+| PR 评论的 `comment_type` 筛选与排序 | 不传 `comment_type` 时是否同时返回 `pr_comment` 和 `diff_comment`；`direction` 按创建还是更新时间排序；发评论是否更新 PR 的 `updated_at` | 先不传；若只返回一种，按两种类型分别读；按 `updated_at` 过滤，阶段 6 用通知补漏 |
+| 私有部署的 Issue 评论 `target`、`state=all` | 私有 Gitee 是否同样返回 `target.issue.number`，`/pulls` 是否接受 `state=all` 并返回 merged | 缺失 `target` 时该条评论跳过；`state=all` 不接受时分别读 `open` 和 `closed`，合并以 `merged_at` 为准 |
+| PR 评论能否在线程内回复 | 用 `POST /pulls/{n}/comments` 试 `in_reply_to_id`、`commit_id`、`path`、`position` 的组合，看网页效果 | 只发顶层 PR 评论；行内评论降级为 PR 顶层评论 |
+| 代码行评论的 `new_line` | `new_line` 的格式和可靠性；没有它时哪些字段可还原行号 | 有 `new_line` 就用；没有就只给 `path`，不给 `line` |
+
+### 9.3 留到阶段 4 以后
+
+| 问题 | 需要的信息 | 当前默认行为 |
+| --- | --- | --- |
+| Gitee 的机器人标记 | `GET /user` 的 `type`/`bot_info`、Gitee Go 等自动账号的登录名规则 | 全部按人处理；策略的 `bots` 名单保留但暂不生效，不要把自动化账号加入 `allowed` |
 | 提交邮箱 | Gitee 账号是否有 noreply/隐私邮箱，是否允许 API 读取 | 不声明 `DSH_SUPERAGENT_GITEE_COMMIT_EMAIL`，由提示词或工单指定作者 |
-| PR 详情与列表的字段一致性 | `GET /pulls/{n}` 是否与列表一样给出 `merged_at`、`state`、`head`、`base` | 以详情为准；字段缺失时退回列表对象 |
-| 通知的 `subject.type`/`subject.url` 取值 | 一条真实的 `/notifications/threads` 响应（事件、@、评论各一条），看 `url` 指向 API 还是网页 | 阶段 6 前不读通知；阶段 6 只把通知当线索，不解析 URL 造 Trigger |
+| PR 详情与列表的字段一致性 | `GET /pulls/{n}` 是否与列表一样给出 `merged_at`、`state`、`head`、`base` | 以详情为准；字段缺失时退回列表对象（阶段 4） |
+| 通知的 `subject.type`/`subject.url` 取值 | 一条真实的 `/notifications/threads` 响应，看 `url` 指向 API 还是网页 | 阶段 6 前不读通知；阶段 6 只把通知当线索，不解析 URL 造 Trigger |
 | Gitee 的限流/分页头 | 正常与超限响应里的 `X-RateLimit-*`、`Retry-After`、`Link` 头 | 不依赖条件请求；每轮最多 10 页；失败按 `failuresBeforeError` 报错 |
 | check-runs 与 Gitee Go | Gitee Go 是否写 check-runs；默认分支的 CI 怎么读；是否有审查/测试状态 | 阶段 6 前不接 CI，不加 CI 的准入行 |
-| 私有 Gitee 部署 | 私有主机是否同样提供 v5 API、通知、check-runs，PAT scope 是否一致 | 首版只验证 gitee.com；`hostname` 字段保留但标注未验证 |
+| 私有 Gitee 部署 | 私有主机是否同样提供 v5 API、通知、check-runs，PAT scope 是否一致 | 首版只验证 gitee.com；`hostname` 字段保留并在面板标注 |
 
 ## 10. 验收
 

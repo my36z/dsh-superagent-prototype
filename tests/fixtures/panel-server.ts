@@ -248,7 +248,7 @@ function initial(): PanelServer {
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
-    setup: { machine: MACHINE, problem: null, feishuProblem: null,
+    setup: { machine: MACHINE, problem: null, feishuProblem: null, giteeProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
     settings, revisions: { policy: 3, eval: 1, executor: 0 },

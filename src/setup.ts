@@ -1,7 +1,7 @@
 /** Structured startup and configuration errors with the settings location where the operator can fix them. */
 import { fill } from './infra/text.ts'
 
-export type SetupPlace = 'deployment' | 'github' | 'feishu'
+export type SetupPlace = 'deployment' | 'github' | 'gitee' | 'feishu'
 export const SETUP_PROBLEMS = {
   foreignFile: ['deployment', '{file} was not written by dsh-superagent; move it, or choose another state directory.'],
   gitTooOld: ['deployment', 'git does not read the github.com credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.'],
@@ -14,6 +14,13 @@ export const SETUP_PROBLEMS = {
   repositoryUnreadable: ['github', '@{account} cannot read {repository}.'],
   repositoryUnreported: ['github', 'The agent GitHub CLI did not return {repository}.'],
   repositoryReadOnly: ['github', '@{account} cannot push to {repository}.'],
+  giteeRepositoryUnset: ['gitee', 'The Gitee Source names no repository.'],
+  giteeCliUnset: ['gitee', 'The agent Gitee CLI is not set.'],
+  giteeCliMissing: ['gitee', 'The agent Gitee CLI was not found.'],
+  giteeCliSignedOut: ['gitee', 'The agent Gitee CLI cannot read its account.'],
+  giteeCliNoAccount: ['gitee', 'The agent Gitee CLI did not report a Gitee account.'],
+  giteeRepositoryUnreadable: ['gitee', '@{account} cannot read {repository}.'],
+  giteeRepositoryReadOnly: ['gitee', '@{account} cannot push to {repository}.'],
   feishuCliFailed: ['feishu', 'The bot lark-cli does not work.'],
   feishuNoApp: ['feishu', 'auth status of the bot lark-cli did not report the app.'],
   feishuBotNotReady: ['feishu', 'The bot identity of app {app} is {status}; configure the app secret with lark-cli.'],

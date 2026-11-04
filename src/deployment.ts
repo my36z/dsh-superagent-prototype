@@ -46,13 +46,22 @@ export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
   cli: z.string().trim().default(''),
 })
+export const GiteeAccountsSchema = z.object({
+  hostname: z.string().trim().regex(/^[a-z0-9.-]+$/, 'a lowercase host name').default('gitee.com'),
+  repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
+  cli: z.string().trim().default(''),
+})
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  github: Object.keys(GithubAccountsSchema.shape), gitee: Object.keys(GiteeAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
 
+/** A resolved Gitee account: the repository it may push to, the CLI wrapper, and the account the CLI is signed in to. */
+export interface GiteeDeployment { hostname: string; repository: string; cli: string; login: string; id: number }
 export interface Deployment extends Machine {
   repository: string
   github: { cli: string; login: string; noreply: string }
+  gitee?: GiteeDeployment
   feishu?: FeishuBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
@@ -103,6 +112,53 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   const repository = access.name
   if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
   return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+}
+
+const GiteeAuthStatus = z.object({ status: z.string().optional(), user: z.string().optional(), login: z.string().optional(),
+  name: z.string().optional(), id: z.number().int().positive().optional() })
+const GiteeUser = z.object({ login: z.string().regex(/^[A-Za-z0-9_.-]+$/), id: z.number().int().positive() })
+const GiteeRepository = z.object({ full_name: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/) })
+const GiteePermission = z.object({ permission: z.string() })
+/** Gitee permission values that allow writing Issues, comments and pull requests. */
+const WRITABLE = new Set(['write', 'admin'])
+/** Parses JSON that a CLI may print after a line of diagnostics. */
+function jsonOf<T>(schema: z.ZodType<T>, text: string): T | undefined {
+  const at = text.indexOf('{')
+  return at < 0 ? undefined : parsed(schema, text.slice(at))
+}
+/**
+ * Verify the agent's Gitee CLI identity and write access to the configured repository.
+ * Gitee's `auth status --json` does not report the numeric account id, so `GET /user` supplies it when the status omits it.
+ */
+export async function resolveGitee(machine: Machine, gitee: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<GiteeDeployment> {
+  const { stateDir } = machine
+  const accounts = GiteeAccountsSchema.parse(gitee ?? {})
+  const remote = accounts.repository
+  if (!remote) throw new SetupError('giteeRepositoryUnset')
+  if (!accounts.cli) throw new SetupError('giteeCliUnset')
+  let cli: string
+  try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('giteeCliMissing', { output: reason(error) }) }
+  const statusText = await probe([cli, 'auth', 'status', '--json']).catch((error: unknown) => { throw new SetupError('giteeCliSignedOut', { output: reason(error) }) })
+  const status = jsonOf(GiteeAuthStatus, statusText)
+  const named = status?.login ?? status?.user ?? status?.name
+  // The official CLI reports `status: "logged in"`; a stored credential that no longer works reports another status.
+  if (!named || status?.status !== undefined && !/logged in/i.test(status.status)) throw new SetupError('giteeCliNoAccount')
+  // The official CLI's `auth status` has no numeric id, while an older contract reports one; read the account only when it is missing.
+  const user = status?.id !== undefined ? { login: named, id: status.id }
+    : jsonOf(GiteeUser, await probe([cli, 'api', '/user']).catch((error: unknown) => { throw new SetupError('giteeCliSignedOut', { output: reason(error) }) }))
+  if (!user) throw new SetupError('giteeCliNoAccount')
+  const repositoryText = await probe([cli, 'api', `/repos/${remote}`]).catch((error: unknown) => {
+    throw new SetupError('giteeRepositoryUnreadable', { account: user.login, repository: remote, output: reason(error) })
+  })
+  const repository = jsonOf(GiteeRepository, repositoryText)?.full_name
+  if (!repository) throw new SetupError('giteeRepositoryUnreadable', { account: user.login, repository: remote })
+  const permissionText = await probe([cli, 'api', `/repos/${repository}/collaborators/${user.login}/permission`]).catch((error: unknown) => {
+    throw new SetupError('giteeRepositoryUnreadable', { account: user.login, repository, output: reason(error) })
+  })
+  const permission = jsonOf(GiteePermission, permissionText)?.permission
+  if (!permission) throw new SetupError('giteeRepositoryUnreadable', { account: user.login, repository })
+  if (!WRITABLE.has(permission.toLowerCase())) throw new SetupError('giteeRepositoryReadOnly', { account: user.login, repository })
+  return { hostname: accounts.hostname, repository, cli, login: user.login, id: user.id }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })
