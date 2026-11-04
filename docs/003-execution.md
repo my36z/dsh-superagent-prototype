@@ -71,9 +71,11 @@ The prepare command and Executor instructions receive the same execution variabl
 | `DSH_SUPERAGENT_GITHUB_REPOSITORY` | GitHub | The repository the Source watches, `owner/name` |
 | `DSH_SUPERAGENT_GITHUB_ACCOUNT`, `DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL` | GitHub | The agent account and its commit email |
 | `DSH_SUPERAGENT_GITHUB_NUMBER`, `DSH_SUPERAGENT_GITHUB_PR_HEAD` | GitHub | The Issue or pull request that started the Ticket, and its head ref when it is a pull request |
+| `DSH_SUPERAGENT_GITEE_HOST`, `DSH_SUPERAGENT_GITEE_REPOSITORY`, `DSH_SUPERAGENT_GITEE_ACCOUNT` | Gitee | The Gitee host, the repository the Source watches, and the agent's Gitee account |
+| `DSH_SUPERAGENT_GITEE_KIND`, `DSH_SUPERAGENT_GITEE_NUMBER` | Gitee | Whether the Ticket started from a Gitee Issue or pull request, and its number |
 | `DSH_SUPERAGENT_FEISHU_BOT`, `DSH_SUPERAGENT_FEISHU_CHAT` | Feishu | The bot, and the chat that started the Ticket |
 
-Ticket-specific values come from its directory and originating Trigger. Other values come from the current deployment settings. Only the panel can change execution environment settings; text sent to the main Session cannot change the configured shell command.
+Ticket-specific values come from its directory and originating Trigger. Other values come from the current deployment settings. A Ticket receives the repository and account variables of its originating Source only, so a GitHub Ticket and a Gitee Ticket never see each other's repository; a Feishu Ticket has no repository of its own and uses the configured GitHub delivery host, or Gitee when no GitHub Source is configured. Only the panel can change execution environment settings; text sent to the main Session cannot change the configured shell command.
 
 Workers reach GitHub through the agent account's `gh` and Feishu through the bot's `lark-cli`. Blocked commands fail when invoked by name.
 

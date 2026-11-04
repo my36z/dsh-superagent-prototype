@@ -25,8 +25,8 @@ export const pullsOf = (ticket: Pick<Ticket, 'follows'>, open = false): number[]
   pullRefs(ticket, open).filter(ref => ref.source === SOURCE).map(ref => ref.number)
 /** True when the PR was opened by the agent account from a branch in the configured repository (not a fork). */
 export const agentPull = (pr: { user: { login: string }; head?: { repo?: { full_name: string } | null } | null },
-  deployment: Pick<Deployment, 'github' | 'repository'>): boolean =>
-  sameName(pr.user.login, deployment.github.login) && sameName(pr.head?.repo?.full_name ?? '', deployment.repository)
+  deployment: Pick<Deployment, 'github'>): boolean =>
+  !!deployment.github && sameName(pr.user.login, deployment.github.login) && sameName(pr.head?.repo?.full_name ?? '', deployment.github.repository)
 const AUTO_MERGE_ON: ThreadFact = { label: { zh: '自动合并', en: 'Auto-merge' }, value: { zh: '已开启', en: 'on' } }
 
 /**
@@ -40,8 +40,10 @@ export function claimPull(ctx: SourceContext, ticketId: string, pr: Pull): strin
   const started = source?.source === SOURCE && source.meta.isPr === true && source.meta.number === pr.number
   const opened = agentPull(pr, ctx.deployment) && ticketBranch(ticket, pr.head.ref)
   if (!started && !opened) {
-    const { login } = ctx.deployment.github
-    return `PR does not belong to this ticket: use the source PR or a PR by ${login} from a branch whose last path segment is DSH_SUPERAGENT_NAME; omit pr_number when no PR exists`
+    const login = ctx.deployment.github?.login
+    return login
+      ? `PR does not belong to this ticket: use the source PR or a PR by ${login} from a branch whose last path segment is DSH_SUPERAGENT_NAME; omit pr_number when no PR exists`
+      : 'The GitHub Source has no working gh CLI'
   }
   const owner = ctx.tickets.open().find(item => pullsOf(item, true).includes(pr.number))
   if (owner && owner.id !== ticketId) return 'PR already belongs to another active ticket'
@@ -97,9 +99,15 @@ export const fromPullRequest = (pr: PullRequest): Pull => ({ number: pr.number, 
 /** The GitHub Source's pull request capability: its Thread ids, reads, binding rules, and merged/closed notice. */
 export const githubPullRequest: PullRequestKind = {
   number: thread => { const match = /^github:(\d+)$/.exec(thread); return match ? Number(match[1]) : undefined },
-  read: async (commands, deployment, number, signal) => toPullRequest(await readPull(commands, number, signal), deployment.repository),
+  read: async (commands, deployment, number, signal) => {
+    const github = deployment.github
+    if (!github) throw new Error('The GitHub Source has no working gh CLI')
+    return toPullRequest(await readPull(commands, number, signal), github.repository)
+  },
   claim: (ctx, ticketId, pr) => claimPull(ctx, ticketId, fromPullRequest(pr)),
   observe: (ctx, pr) => observePull(ctx, fromPullRequest(pr)),
-  notices: (ticket, request, deployment) => pullEndNoticesFor(SOURCE, ticket, request,
-    number => githubPage(deployment.repository, number, true)),
+  notices: (ticket, request, deployment) => {
+    const github = deployment.github
+    return github ? pullEndNoticesFor(SOURCE, ticket, request, number => githubPage(github.repository, number, true)) : []
+  },
 }

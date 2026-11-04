@@ -20,6 +20,8 @@ export interface SourceContextDeps {
   configured(): boolean
   /** Setup problem whose `place` matches the Source kind receives it on `context.problem`. */
   readonly setupProblem?: SetupProblem | undefined
+  /** Why the GitHub Source's repository or account could not be verified while another Source runs. */
+  readonly githubProblem?: SetupProblem | undefined
   /** Why setup found no Feishu bot even though the Feishu Source names a CLI. */
   readonly feishuProblem?: SetupProblem | undefined
   /** Why the Gitee Source's repository or account could not be verified. */
@@ -40,7 +42,7 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     commands: deps.commands,
     ready: deps.ready,
     configured: () => deps.configured(),
-    get problem() { return [deps.giteeProblem, deps.feishuProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
+    get problem() { return [deps.githubProblem, deps.giteeProblem, deps.feishuProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
     config: <C extends Record<string, unknown>>(id: string) => {
       const instance = deps.sources.instance<C>(id)
       return instance?.enabled ? instance.config : undefined

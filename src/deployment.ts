@@ -7,7 +7,7 @@ import s from '@deepseek-ai/schemastery'
 import { z } from 'zod'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
-import { SetupError } from './setup.ts'
+import { SetupError, type SetupProblem } from './setup.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
@@ -56,11 +56,16 @@ export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = {
   github: Object.keys(GithubAccountsSchema.shape), gitee: Object.keys(GiteeAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
 
+/** A resolved GitHub account: the repository it may push to, the CLI wrapper, and the account the CLI is signed in to. */
+export interface GithubDeployment { repository: string; cli: string; login: string; noreply: string }
 /** A resolved Gitee account: the repository it may push to, the CLI wrapper, and the account the CLI is signed in to. */
 export interface GiteeDeployment { hostname: string; repository: string; cli: string; login: string; id: number }
+/**
+ * The resolved deployment: each Source keeps its own repository and account, so a deployment may configure GitHub, Gitee,
+ * or both. At least one of `github` and `gitee` is present once setup succeeds; the old top-level `repository` is gone.
+ */
 export interface Deployment extends Machine {
-  repository: string
-  github: { cli: string; login: string; noreply: string }
+  github?: GithubDeployment
   gitee?: GiteeDeployment
   feishu?: FeishuBot
 }
@@ -93,7 +98,7 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   return result.success ? result.data : undefined
 }
 /** Verify the agent's GitHub CLI identity and push access to the configured repository. */
-export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
+export async function resolveGithub(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<GithubDeployment> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
   const remote = accounts.repository
@@ -111,7 +116,7 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
   const repository = access.name
   if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
-  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  return { repository, cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` }
 }
 
 const GiteeAuthStatus = z.object({ status: z.string().optional(), user: z.string().optional(), login: z.string().optional(),
@@ -159,6 +164,50 @@ export async function resolveGitee(machine: Machine, gitee: unknown, probe: Prob
   if (!permission) throw new SetupError('giteeRepositoryUnreadable', { account: user.login, repository })
   if (!WRITABLE.has(permission.toLowerCase())) throw new SetupError('giteeRepositoryReadOnly', { account: user.login, repository })
   return { hostname: accounts.hostname, repository, cli, login: user.login, id: user.id }
+}
+
+/** A Source's stored settings, as setup reads them. */
+export interface SourceSetting { enabled?: boolean; config?: unknown }
+/** What setup resolved from the Source settings: each available Source, each failed Source's problem, and why setup cannot start. */
+export interface ResolvedSources {
+  github?: GithubDeployment
+  gitee?: GiteeDeployment
+  githubProblem?: SetupProblem
+  giteeProblem?: SetupProblem
+  /** Present only when neither Source resolved; the deployment reports it as the setup problem. */
+  failure?: SetupError
+}
+/**
+ * Resolves each enabled Source independently, so a failed check keeps its problem on that Source's card while the other
+ * Source still runs. GitHub is the original Source and is probed unless the operator disabled it; Gitee is probed only
+ * while its stored instance is enabled. Setup fails only when both are unavailable.
+ */
+export async function resolveSources(machine: Machine, sources: { github?: SourceSetting; gitee?: SourceSetting }, probe: Probe,
+  path = process.env.PATH ?? ''): Promise<ResolvedSources> {
+  let github: GithubDeployment | undefined
+  let gitee: GiteeDeployment | undefined
+  let githubProblem: SetupProblem | undefined
+  let giteeProblem: SetupProblem | undefined
+  let firstFailure: SetupError | undefined
+  if (sources.github?.enabled !== false) {
+    try { github = await resolveGithub(machine, sources.github?.config, probe, path) }
+    catch (error) {
+      if (!(error instanceof SetupError)) throw error
+      githubProblem = error.problem
+      firstFailure = error
+    }
+  }
+  if (sources.gitee?.enabled === true) {
+    try { gitee = await resolveGitee(machine, sources.gitee.config, probe, path) }
+    catch (error) {
+      if (!(error instanceof SetupError)) throw error
+      giteeProblem = error.problem
+      firstFailure ??= error
+    }
+  }
+  const failure = !github && !gitee ? firstFailure ?? new SetupError('repositoryUnset') : undefined
+  return { ...(github ? { github } : {}), ...(gitee ? { gitee } : {}), ...(githubProblem ? { githubProblem } : {}),
+    ...(giteeProblem ? { giteeProblem } : {}), ...(failure ? { failure } : {}) }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })

@@ -344,6 +344,24 @@ describe('gitee pull requests', () => {
       new AbortController().signal)).rejects.toThrow('The gitee Source has no pull request support')
     expect(calls.some(call => call.path.includes('/pulls/43'))).toBe(false)
   })
+  it('delivers a Feishu ticket on Gitee when the deployment has no GitHub Source', async () => {
+    const h = host()
+    const calls = gitee(h, { 'pulls/44': pr(44, { user: { login: 'agent-bot' }, head: 'agent/fix-4' }) })
+    const origin = { id: 'feishu-1', source: 'feishu', threads: [{ source: 'feishu', id: 'oc_1:om_1' }], actor: { source: 'feishu', id: 'ou_alice' },
+      human: true, at: new Date().toISOString(), text: '请修一下标题', meta: {} } as Trigger
+    h.store.triggers.save(origin)
+    h.store.tickets.save(openTicket('t4', 'fix-4', origin.id))
+    const giteeContext = h
+    const githubContext = { deployment: testDeployment({ github: undefined,
+      gitee: { hostname: 'gitee.com', repository: 'acme/widgets', cli: 'gitee-agent', login: 'agent-bot', id: 7 } }) } as never
+    const context = (source: string) => source === 'gitee' ? giteeContext : source === 'github' ? githubContext : undefined
+    const base = { engine: h.engine, store: h.store, sessions: { relay: vi.fn(), notify: vi.fn() }, resources: {} as never,
+      sources: h.sources, sourceContext: context, sendReplies: async () => {} }
+    const report = executorTools(base as never, h.store.tickets.get('t4')!).find(tool => tool.name === 'orchestrator_report')!
+    await report.execute({ state: 'progress', summary: 'pr open', pr_number: 44 } as never, new AbortController().signal)
+    expect(calls).toContainEqual(expect.objectContaining({ path: '/repos/acme/widgets/pulls/44' }))
+    expect(h.store.tickets.get('t4')!.follows).toEqual([{ thread: 'gitee:pr:44', own: true }])
+  })
 })
 
 describe('gitee replies', () => {

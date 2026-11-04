@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
+import { Config, executable, machineOf, resolveFeishuBot, resolveGithub, resolveSources, type Machine, type Probe } from '../src/deployment.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -13,6 +13,9 @@ let path: string
 const program = (file: string, body = ''): string => { writeFileSync(file, `#!/bin/sh\n${body}\n`); chmodSync(file, 0o755); return file }
 /** Fake gh CLI signed in as `login` with configurable push access to acme/widgets (including its former name acme/gadgets). */
 const gh = (file: string, login: string, push = true): string => program(file, `case "$*" in\n  "api user") echo '{"login":"${login}","id":7}' ;;\n  "api repos/acme/"*" --jq {name: .full_name, push: .permissions.push}") echo '{"name":"acme/widgets","push":${push}}' ;;\n  *) exit 1 ;;\nesac`)
+/** Fake gitee-cli signed in as `login` with configurable permission on acme/widgets (canonical name for acme/gadgets too). */
+const gitee = (file: string, login = 'Agent-Gitee', permission = 'write'): string => program(file,
+  `case "$*" in\n  "auth status --json") echo '{"status":"logged in","user":"${login}"}' ;;\n  "api /user") echo '{"login":"${login}","id":9}' ;;\n  "api /repos/acme/widgets/collaborators/${login}/permission") echo '{"permission":"${permission}"}' ;;\n  "api /repos/acme/"*) echo '{"full_name":"acme/widgets"}' ;;\n  *) exit 1 ;;\nesac`)
 /** Fake lark-cli script body returning canned auth, strict-mode, and bot info responses. */
 const lark = (status: object, mode = 'bot', bot: object = { bot: { open_id: 'ou_bot', app_name: 'Widgets Bot' }, code: 0 }): string =>
   `case "$*" in\n  "auth status") echo '${JSON.stringify(status)}' ;;\n  "config strict-mode") echo 'strict-mode: ${mode} (source: profile)' ;;\n  "api GET /open-apis/bot/v3/info --as bot --format ndjson") echo '${JSON.stringify(bot)}' ;;\nesac`
@@ -27,6 +30,7 @@ beforeEach(async () => {
   mkdirSync(join(dir, 'bin')); mkdirSync(join(dir, 'state', 'worker-bin'), { recursive: true }); mkdirSync(join(dir, 'widgets', 'src'), { recursive: true })
   path = [join(dir, 'state-link', 'worker-bin'), `${join(dir, 'state', 'worker-bin')}/`, join(dir, 'bin'), '/usr/bin', '/bin'].join(':')
   gh(join(dir, 'bin', 'gh'), 'Agent-Bot')
+  gitee(join(dir, 'bin', 'gitee-cli'))
   program(join(dir, 'bin', 'lark-cli'), lark({ appId: 'cli_bot', brand: 'lark', identities: { bot: { status: 'ready' } } }))
   // Stale worker shims with the same binary name must be skipped regardless of PATH normalization or symlinks.
   program(join(dir, 'state', 'worker-bin', 'gh'))
@@ -58,16 +62,40 @@ describe('configuration schema', () => {
 
 describe('setup', () => {
   it('reads the repository from the GitHub Source and the accounts from their CLIs, skipping the worker shims', async () => {
-    const deployment = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
-    expect(deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' } })
-    expect(deployment.github).toEqual({ cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' })
-    expect(deployment).not.toHaveProperty('feishu')
+    const github = await resolveGithub(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
+    expect(github).toEqual({ repository: 'acme/widgets', cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' })
     // A renamed repository is still resolved by its old name; notifications carry GitHub's current full_name.
-    expect((await resolveDeployment(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path)).repository).toBe('acme/widgets')
+    expect((await resolveGithub(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path)).repository).toBe('acme/widgets')
+  })
+  it('resolves only the Sources that are configured, so a Gitee-only deployment needs no GitHub account', async () => {
+    const resolved = await resolveSources(machine(), { github: { enabled: false, config: {} },
+      gitee: { enabled: true, config: { repository: 'acme/widgets', cli: 'gitee-cli' } } }, probe, path)
+    expect(resolved.github).toBeUndefined()
+    expect(resolved.gitee).toEqual({ hostname: 'gitee.com', repository: 'acme/widgets', cli: join(dir, 'bin', 'gitee-cli'),
+      login: 'Agent-Gitee', id: 9 })
+    expect(resolved).not.toHaveProperty('failure')
+    expect(resolved).not.toHaveProperty('githubProblem')
+  })
+  it('keeps a failed Source on its own card while the other Source runs, and fails setup only when neither resolves', async () => {
+    const onlyGithub = await resolveSources(machine(), { github: { enabled: true, config: { repository: 'acme/widgets', cli: 'gh' } },
+      gitee: { enabled: true, config: {} } }, probe, path)
+    expect(onlyGithub.github).toMatchObject({ repository: 'acme/widgets', login: 'Agent-Bot' })
+    expect(onlyGithub.gitee).toBeUndefined()
+    expect(onlyGithub.giteeProblem).toMatchObject({ place: 'gitee', code: 'giteeRepositoryUnset' })
+    expect(onlyGithub).not.toHaveProperty('failure')
+    const onlyGitee = await resolveSources(machine(), { github: { enabled: true, config: {} },
+      gitee: { enabled: true, config: { repository: 'acme/widgets', cli: 'gitee-cli' } } }, probe, path)
+    expect(onlyGitee.gitee).toMatchObject({ repository: 'acme/widgets', login: 'Agent-Gitee' })
+    expect(onlyGitee.githubProblem).toMatchObject({ place: 'github', code: 'repositoryUnset' })
+    expect(onlyGitee).not.toHaveProperty('failure')
+    const neither = await resolveSources(machine(), { github: { enabled: true, config: {} } }, probe, path)
+    expect(neither).toMatchObject({ failure: { code: 'repositoryUnset', place: 'github' } })
+    expect(neither).not.toHaveProperty('github')
+    expect(neither).not.toHaveProperty('gitee')
   })
   it('names what setup needs and where it is set', async () => {
     const needs = (place: string, code: string, values: Record<string, unknown>, github: unknown) =>
-      expect(resolveDeployment(machine(), github, probe, path)).rejects.toEqual(setupError(place, code, values))
+      expect(resolveGithub(machine(), github, probe, path)).rejects.toEqual(setupError(place, code, values))
     const repository = 'acme/widgets'
     await needs('github', 'repositoryUnset', {}, { cli: 'gh' })
     await needs('github', 'agentCliUnset', {}, { repository })
