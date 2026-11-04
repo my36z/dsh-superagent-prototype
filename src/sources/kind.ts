@@ -23,6 +23,17 @@ export type FieldSpec =
 
 export interface VariableSpec { key: string; description: Localized }
 export interface EnvironmentInput<C> { deployment: Deployment; config: C; trigger?: Trigger }
+/**
+ * A Source's execution environment. `repository` marks the variables that describe the Source's own repository and account:
+ * only the Ticket's own repository Source supplies them, except that a Feishu Ticket uses the configured delivery host.
+ * `ready` hides them until setup resolved that Source.
+ */
+export interface SourceEnvironment<C> {
+  repository?: true
+  ready?(deployment: Deployment): boolean
+  variables: readonly VariableSpec[]
+  values(input: EnvironmentInput<C>): Record<string, string>
+}
 export interface AdmissionRowView { id: string; label: Localized | string; note: Localized; cells: { listedUnaddressed: boolean; unlistedAddressed: boolean; unlistedUnaddressed: boolean } }
 /** Policy extension for a source kind, defining allowed senders, admission table rows, and optional external roster sync. */
 export interface SourcePolicyPart<P extends Record<string, unknown>> {
@@ -41,7 +52,7 @@ export interface SourcePolicyPart<P extends Record<string, unknown>> {
 }
 /** UI link for a channel address; `triggerId` names the Trigger whose own deep link is preferred when available. */
 export interface ChannelLink { url: string; label: Localized; triggerId?: string }
-export type ChannelLinks = Partial<Pick<Deployment, 'repository' | 'feishu'>>
+export interface ChannelLinks { repository?: string | undefined; feishu?: Deployment['feishu'] }
 /** Outbound messaging adapter for a source kind's threads. */
 export interface SourceChannel<C> {
   /** Whether a reply may still go to `address`; without it, every address may receive replies. */
@@ -150,7 +161,7 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   /** Rereads display names for row keys (such as chat names), stores the resolved names in `KV.sources.labels(kind)`, and returns them. */
   refreshLabels?(host: SourceHost, signal?: AbortSignal): Promise<Record<string, string>>
   /** Variables the kind registers with the execution environment and how their values are computed. */
-  environment?: { variables: readonly VariableSpec[]; values(input: EnvironmentInput<C>): Record<string, string> }
+  environment?: SourceEnvironment<C>
 }
 
 export interface SourceInstance<C extends Record<string, unknown> = Record<string, unknown>> { id: string; kind: string; enabled: boolean; config: C }

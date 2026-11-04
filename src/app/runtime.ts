@@ -159,7 +159,8 @@ export class Runtime extends Service implements SourceHost {
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
-        get giteeProblem() { return setup.giteeProblem }, receive: trigger => passes.receive(trigger) }
+        get githubProblem() { return setup.githubProblem }, get giteeProblem() { return setup.giteeProblem },
+        receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources, sources,
         sourceContext: (kind: string) => { const source = sources.kind(kind); return source ? runtime.context(source) : undefined },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
@@ -179,13 +180,16 @@ export class Runtime extends Service implements SourceHost {
   get deployment(): Deployment { return this.setup.deployment }
   configured(): boolean { return this.setup.configured() }
   get setupProblem(): SetupProblem | undefined { return this.setup.problem }
+  /** Why the GitHub Source is unavailable even though another Source runs. */
+  get githubProblem(): SetupProblem | undefined { return this.setup.githubProblem }
   /** Why the Feishu bot is unavailable even though the Feishu Source configures a CLI. */
   get feishuProblem(): SetupProblem | undefined { return this.setup.feishuProblem }
   /** Why the Gitee Source's repository or account could not be verified. */
   get giteeProblem(): SetupProblem | undefined { return this.setup.giteeProblem }
   links(): LinkTarget {
     const resolved = this.setup.configured() ? this.setup.deployment : undefined
-    const links = resolved ? { repository: resolved.repository, ...(resolved.feishu ? { feishu: resolved.feishu } : {}) } : {}
+    const links = resolved ? { ...(resolved.github ? { repository: resolved.github.repository } : {}),
+      ...(resolved.feishu ? { feishu: resolved.feishu } : {}) } : {}
     return channel => this.sources.link(channel, links)
   }
   ticketEnvironment(ticket: Ticket): Variable[] {
@@ -224,8 +228,8 @@ export class Runtime extends Service implements SourceHost {
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
       get deployment() { return setup.deployment },
-      get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
-      get giteeProblem() { return setup.giteeProblem },
+      get setupProblem() { return setup.problem }, get githubProblem() { return setup.githubProblem },
+      get feishuProblem() { return setup.feishuProblem }, get giteeProblem() { return setup.giteeProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
       checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
   }

@@ -100,6 +100,8 @@ export const giteeKind: SourceKind<GiteeConfig> = {
     },
   },
   environment: {
+    repository: true,
+    ready: deployment => !!deployment.gitee,
     variables: [
       { key: 'DSH_SUPERAGENT_GITEE_HOST', description: { zh: 'Gitee 主机，默认 gitee.com', en: 'The Gitee host, gitee.com by default' } },
       { key: 'DSH_SUPERAGENT_GITEE_REPOSITORY', description: { zh: '这个来源监听的仓库，owner/name', en: 'The repository this Source watches, as owner/name' } },

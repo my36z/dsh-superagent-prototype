@@ -782,6 +782,12 @@ describe('github source', () => {
       const off = await start({}, { enabled: false, config: {} })
       await vi.waitFor(() => expect(off.value.health.github).toMatchObject({ state: 'paused', code: 'sourceOff' }))
       await off.stop()
+      // Setup succeeded through another Source, but this one has no account: it waits for its own fix and does not poll.
+      const noGithub = await start({ deployment: testDeployment({ github: undefined,
+        gitee: { hostname: 'gitee.com', repository: 'acme/widgets', cli: '/bin/false', login: 'agent-gitee', id: 9 } }),
+        githubProblem: new SetupError('repositoryUnset').problem })
+      await vi.waitFor(() => expect(noGithub.value.health.github).toMatchObject({ state: 'paused', code: 'setupPending' }))
+      await noGithub.stop()
       // Rounds fail, succeed, fail, fail: only the last two in a row make the error. A round reads through a Commands of its own.
       const outcomes = [false, true, false, false]
       let round = 0

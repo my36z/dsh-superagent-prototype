@@ -6,6 +6,7 @@ import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
+import { testDeployment, testMachine } from './fixtures/deployment.ts'
 
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
@@ -65,6 +66,20 @@ it('decodes path parameters and parses each route\'s query', async () => {
   // Invalid offsets default to 0, and limits above the route maximum are clamped.
   expect(await call('GET', 'decisions?kind=accept%2Creopen&limit=500&offset=x&window=24h')).toEqual({ status: 200, body: { items: [], next_offset: null } })
   expect(seen).toEqual(['feishu:oc_1:om/root', { filter: { kinds: ['accept', 'reopen'], since: expect.any(String) }, offset: 0, limit: 200 }])
+})
+
+it('reports the Gitee repository and account as the deployment when only Gitee is configured', async () => {
+  const problem = new SetupError('repositoryUnset').problem
+  const call = serve({
+    store: { settings: () => SettingsSchema.parse({}), tickets: { open: () => [] } }, executor: { activeCount: () => 0 }, masterId: 'master', health: {},
+    machine: testMachine(), configured: () => true,
+    deployment: testDeployment({ github: undefined, feishu: undefined, gitee: { hostname: 'gitee.com', repository: 'acme/gitee-widgets',
+      cli: '/bin/false', login: 'gitee-bot', id: 9 } }),
+    githubProblem: problem,
+  })
+  // The status view, which `scripts/dsh-superagent status` reads, names the running delivery host and keeps the GitHub problem separate.
+  expect(await call('GET', 'state')).toMatchObject({ status: 200, body: { setup: { problem: null, githubProblem: problem,
+    accounts: { repository: 'acme/gitee-widgets', agent: 'gitee-bot', source: 'gitee', feishu: null } } } })
 })
 
 it('answers only a same-origin request from the panel on the loopback address', async () => {

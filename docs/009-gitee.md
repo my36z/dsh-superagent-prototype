@@ -170,7 +170,7 @@ const GiteeConfigSchema = GiteeAccountsSchema.extend({
 3. 运行 `gitee-cli api /repos/{repository}`，确认仓库可读；运行 `gitee-cli api /repos/{repository}/collaborators/{login}/permission`，确认权限包含写（Gitee 返回的权限值待确认）；失败映射到 `giteeRepositoryUnreadable` / `giteeRepositoryReadOnly`。
 4. 把 `{ hostname, repository, cli, login, id, commitEmail? }` 放进 `Deployment.gitee`。`commitEmail` 只有确认 Gitee 提供可用的提交邮箱后才加，否则不提供，由提示词指定作者。
 
-与飞书一样，Gitee 的 setup 失败只记录 `giteeProblem`，不让整个 dsh-superagent 停止：GitHub 来源仍可工作。`SourceContext.problem` 按 `place === 'gitee'` 取到它。若以后允许只配置 Gitee（阶段 5），则必须把 GitHub 的 `resolveDeployment` 也改成可选，并把规则改为“没有任何来源可用时 setup 失败；还有 GitHub 时只记录 Gitee 问题”。
+与飞书一样，Gitee 的 setup 失败只记录 `giteeProblem`，不让整个 dsh-superagent 停止：GitHub 来源仍可工作。`SourceContext.problem` 按 `place === 'gitee'` 取到它。阶段 5 起 GitHub 的解析同样可选：`resolveSources` 分别解析两个来源，任一可用即可启动，失败的一方只留下自己的 problem（`githubProblem` / `giteeProblem`）；只有两个都不可用时 setup 才失败。
 
 执行环境变量（只在来源启用时提供）：
 
@@ -182,7 +182,9 @@ const GiteeConfigSchema = GiteeAccountsSchema.extend({
 | `DSH_SUPERAGENT_GITEE_KIND` | `issue` 或 `pr`；工单不是从 Gitee 来时为空 |
 | `DSH_SUPERAGENT_GITEE_NUMBER` | 触发所在的 Issue 或 PR 编号；不是 Gitee 工单时为空 |
 
-`DSH_SUPERAGENT_GITEE_COMMIT_EMAIL` 在确认 Gitee 的可用提交邮箱之前不声明；首版由提示词指定提交作者。`DSH_SUPERAGENT_GITEE_PR_HEAD` 不需要：Gitee 的 PR 以分支名表示 head，worker 从自己的分支推送，不需要 GitHub 那种 `refs/pull/<n>/head`。
+`DSH_SUPERAGENT_GITEE_COMMIT_EMAIL` 在确认 Gitee 的可用提交邮箱之前不声明；首版由提示词指定提交作者。`DSH_SUPERAGENT_GITEE_PR_HEAD` 不需要：Gitee 的 PR `head` 是带 `label`、`ref`、`sha` 的对象，关联 head 仍用 `ref` 分支名，worker 从自己的分支推送，不需要 GitHub 那种 `refs/pull/<n>/head`。
+
+阶段 5 起，工单只收到自己来源的仓库变量：Gitee 工单出现 `DSH_SUPERAGENT_GITEE_*`，不出现也不需要 `DSH_SUPERAGENT_GITHUB_*`；GitHub 工单反之。Feishu 工单本身没有仓库，使用部署的交付主机（GitHub 已解析时用 GitHub，否则用 Gitee）的变量。
 
 ### 3.4 策略部分与准入表
 
@@ -367,7 +369,7 @@ export interface PullRequestKind {
 
 - `SourceRegistry` 暴露 `pullRequests(source)`；`cards.ts` 用 `pullOf(ticket)` 得到 `{ source, number }` 后查对应能力。
 - `orchestrator_report` 的 `pr_number` 先按工单的来源（`ticket.origin.triggerId` 的 `source`）选择能力；来源没有 PR 能力或编号不在该来源时，返回明确错误，不回退到 GitHub。
-- Gitee 的 `claim` 不能照抄 GitHub 的 `head.repo` 判断：Gitee 的 PR 对象只有 `head`/`base` 分支名字符串，没有 `head.sha`/`head.repo`。绑定条件改为“PR 作者是智能体账号、PR 在配置的仓库内、`head` 的分支名最后一段等于工单的执行名”。来源 PR 仍按 Trigger 的 `meta.number` 直接匹配。
+- Gitee 的 `claim` 不能照抄 GitHub 的 `head.repo` 判断：Gitee 的 PR 对象 `head` 是 `{label, ref, sha}`（有 `sha`），`base` 是分支名字符串，缺的只是 `head.repo`（没有 head 仓库）。绑定条件改为“PR 作者是智能体账号、PR 在配置的仓库内、`head` 的分支名最后一段等于工单的执行名”。来源 PR 仍按 Trigger 的 `meta.number` 直接匹配。
 - Gitee 的 `observe` 用 `state` 和 `merged_at`：`merged_at` 非空即合并，`state === 'closed'` 且未合并即关闭；`GET /pulls/{number}` 的字段是否与列表一致待确认。关闭时调用 `threadClosed`，和 GitHub 的 `closePull` 相同。
 - 工单用 `gitee-cli pr create` 开 PR，开完在 `orchestrator_report` 里报 `pr_number`；worker 的提示词读取 `DSH_SUPERAGENT_GITEE_*`，不再假设 GitHub 变量。提示词先写明“当 `DSH_SUPERAGENT_GITEE_REPOSITORY` 非空时走 Gitee 流程”，不改造成按来源拼提示词；如果以后要支持更多来源，再考虑 `SourceKind` 提供交付段落。
 
@@ -386,7 +388,7 @@ Gitee 有与 GitHub 通知对等的接口：`/notifications/threads` 列出授�
 | 通知接口 | `notifications?all=true&since=…`，裸数组，带 `x-poll-interval` | `/notifications/threads` 与 `/repos/{owner}/{repo}/notifications`，返回 `{total_count,list}`，有 `since`、`unread`、`type=event\|referer`；`subject.type`/`subject.url` 的取值未枚举 |
 | 评论读取 | Issue 评论和 PR 评论都有时间过滤；另有 review 列表 | Issue 评论有 `since`；PR 评论没有 `since`；没有列出 review 的接口 |
 | 评论回复 | Issue 评论顶层；review 评论可在线程内回复 | 只有顶层评论；创建接口没有 `in_reply_to_id`，读取有该字段 |
-| PR 模型 | `head.sha`、`head.ref`、`head.repo`、`auto_merge`、合并状态 | `head`/`base` 是分支字符串，没有 head 仓库；用 `merged_at`/`state`；没有自动合并字段 |
+| PR 模型 | `head.sha`、`head.ref`、`head.repo`、`auto_merge`、合并状态 | `head` 是 `{label, ref, sha}`，`base` 是分支字符串，没有 head 仓库；用 `merged_at`/`state`；没有自动合并字段 |
 | CI | Actions check-runs，默认分支和 PR 的 CI 都能读 | 有 check-runs 读接口；Gitee Go 是否写入、默认分支怎么表示待确认 |
 | 权限粒度 | PAT/`gh` 的 repo scope；setup 检查 push | PAT 的 `projects`、`issues`、`pull_requests` 等 scope；`collaborators/{user}/permission` 可查仓库权限，权限值待确认 |
 | 机器人识别 | GitHub App、`[bot]` 后缀、`type` | 没有确认的 `[bot]` 约定；`type`/`bot_info` 是否可用待确认。确认不了时全部按人处理，策略 `bots` 名单只对已标成 `human:false` 的 Trigger 生效 |
@@ -458,8 +460,8 @@ Gitee 有与 GitHub 通知对等的接口：`/notifications/threads` 列出授�
 ### 9.4 阶段 4（PR 投递）的实现约定
 
 - `SourceKind.pullRequest` 是可选的 PR 能力（`PullRequestKind`）：`number(thread)`、`read(commands, deployment, number, signal)`、`claim(ctx, ticketId, pr)`、`observe(ctx, pr)`、`notices(ticket, request, deployment)`。`SourceRegistry.pullRequests(source)` 是唯一的取用入口。
-- `PullRequest` 是跨来源的归一化对象：`number`、`state`、`merged`、`mergedAt`、`closedAt`、`htmlUrl`、`head`、`author`、`repository`，以及 GitHub 才有的 `headRepository`、`headSha`、`autoMerge`。Gitee 的 `head` 按分支名读取（也容忍带 `ref` 的对象）。
-- `orchestrator_report` 先用工单跟随的 PR 的来源，否则用触发工单的来源；Feishu 工单沿用本版部署的 GitHub 交付主机，Gitee 工单没有 PR 能力时返回明确错误，不回退到 GitHub。
+- `PullRequest` 是跨来源的归一化对象：`number`、`state`、`merged`、`mergedAt`、`closedAt`、`htmlUrl`、`head`、`author`、`repository`，以及 GitHub 才有的 `headRepository`、`headSha`、`autoMerge`。Gitee 的 `head` 从对象取 `ref`（也容忍裸分支名），`sha` 存在但绑定不需要它。
+- `orchestrator_report` 先用工单跟随的 PR 的来源，否则用触发工单的来源；Feishu 工单使用部署的交付主机（GitHub 已解析时用 GitHub，否则用 Gitee），Gitee 工单没有 PR 能力时返回明确错误，不回退到 GitHub。
 - Gitee 的 `claim` 按「作者是智能体账号 + `repository` 是配置的仓库 + `head` 最后一段等于 `DSH_SUPERAGENT_NAME`」绑定；来源 PR 仍按 Trigger 的 `meta.kind`/`meta.target` 与 `meta.number` 匹配。`observe` 以 `merged_at` 判合并、`state === 'closed'` 且未合并判关闭；结束时调用 `threadClosed`。
 - 轮询每轮观察 `/pulls` 返回的 PR，并逐个读取开放工单跟随的 PR；`notices` 复用 `pullEndNotices` 的文案与稳定 id，只发给非 Gitee 渠道。
 - worker 提示词以 `DSH_SUPERAGENT_GITEE_REPOSITORY` 非空作为 Gitee 分支：`gitee-cli pr create` 开 PR、`gitee-cli pr view` 读状态，Gitee PR 由人合并，不假设 `gh`、GitHub 变量或 `refs/pull/<n>/head`。

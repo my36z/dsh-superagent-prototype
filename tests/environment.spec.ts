@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SENSITIVE_ENV_PATTERN, type SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { GIT_LOCATION, agentVariables, credentialHelper, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
+import { GIT_LOCATION, agentVariables, credentialHelper, runAsWorker, verifyDirectory, verifyEnvironment, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
   from '../src/infra/environment.ts'
 import { CliError } from '../src/infra/commands.ts'
 import { testDeployment } from './fixtures/deployment.ts'
@@ -38,6 +38,40 @@ describe('worker shims', () => {
     await expect(exec(join(bin, 'lark-cli'), ['im', '+chat-list'])).rejects.toMatchObject({ code: 1, stderr: 'lark-cli is unavailable: this installation has no Feishu bot.\n' })
     await expect(exec(join(bin, 'personal-gh'), [])).rejects.toMatchObject({ code: 1, stderr: 'personal-gh is blocked in this installation; use gh, which acts as agent-bot.\n' })
   })
+  it('gives a Gitee-only deployment a gitee-cli shim and gitee.com credential helper, and fails gh without a GitHub Source', async () => {
+    const giteeCli = program(join(dir, 'gitee-agent'), 'echo gitee "$@"')
+    const deployment = testDeployment({ stateDir: dir, github: undefined,
+      gitee: { hostname: 'gitee.com', repository: 'acme/widgets', cli: giteeCli, login: 'agent-gitee', id: 9 } })
+    await writeEnvironment(deployment, [])
+    const bin = workerBin(dir)
+    await expect(exec(join(bin, 'gh'), ['api', 'user'])).rejects.toMatchObject({ code: 1,
+      stderr: 'gh is unavailable: this installation has no GitHub Source.\n' })
+    expect((await exec(join(bin, 'gitee-cli'), ['auth', 'status'])).stdout).toBe('gitee auth status\n')
+    const config = readFileSync(workerGitConfig(dir), 'utf8')
+    expect(config).toContain('[credential "https://gitee.com"]')
+    expect(config).toContain('[url "https://gitee.com/"]')
+    expect(config).not.toContain('[credential "https://github.com"]')
+    const env = workerEnv({ PATH: process.env.PATH, HOME: dir, ...agentVariables(dir) })
+    expect((await exec('git', ['config', '--get-all', 'credential.https://gitee.com.helper'], { cwd: dir, env })).stdout.trim())
+      .toBe(credentialHelper(giteeCli))
+    // The operator's Gitee token must not reach a worker any more than a GitHub token does.
+    vi.stubEnv('GITEE_TOKEN', 'operator-token')
+    try { expect(agentVariables(dir).GITEE_TOKEN).toBeUndefined() } finally { vi.unstubAllEnvs() }
+  })
+  it('writes one credential helper per configured host and verifies each host separately', async () => {
+    const gh = program(join(dir, 'gh-agent'), 'echo gh "$@"'), giteeCli = program(join(dir, 'gitee-agent'), 'echo gitee "$@"')
+    const base = testDeployment()
+    const deployment = testDeployment({ stateDir: dir, github: { ...base.github, cli: gh },
+      gitee: { hostname: 'gitee.com', repository: 'acme/widgets', cli: giteeCli, login: 'agent-gitee', id: 9 } })
+    await writeEnvironment(deployment, [])
+    const env = workerEnv({ PATH: process.env.PATH, HOME: dir, ...agentVariables(dir) })
+    const helper = async (host: string) => (await exec('git', ['config', '--show-origin', '--get-all', `credential.https://${host}.helper`],
+      { cwd: dir, env })).stdout.trim()
+    expect(await helper('github.com')).toBe(`file:${workerGitConfig(dir)}\t${credentialHelper(gh)}`)
+    expect(await helper('gitee.com')).toBe(`file:${workerGitConfig(dir)}\t${credentialHelper(giteeCli)}`)
+    // Both hosts read their own helper from the file dsh-superagent wrote, as setup checks.
+    await expect(verifyEnvironment(deployment, subprocess(workerGitConfig(dir)), new AbortController().signal)).resolves.toBeUndefined()
+  })
   it('keep `gh` and `lark-cli` working, and shim no `git`, when the blocked commands name the commands workers need', async () => {
     const gh = program(join(dir, 'gh-agent'), 'echo gh "$@"'), lark = program(join(dir, 'lark-bot'), 'echo lark "$@"')
     const base = testDeployment()
@@ -49,7 +83,7 @@ describe('worker shims', () => {
   it('replace only what dsh-superagent wrote and refuse anything else in its places', async () => {
     await writeEnvironment(testDeployment({ stateDir: dir }), ['old-cli'])
     await writeEnvironment(testDeployment({ stateDir: dir }), [])
-    expect(readdirSync(workerBin(dir)).sort()).toEqual(['gh', 'lark-cli'])
+    expect(readdirSync(workerBin(dir)).sort()).toEqual(['gh', 'gitee-cli', 'lark-cli'])
     // A file that merely contains the marker on a later line, a symlink to a shim, and a foreign gitconfig are all rejected.
     writeFileSync(join(workerBin(dir), 'notes'), `notes\nmore\n${readFileSync(join(workerBin(dir), 'gh'), 'utf8').split('\n')[1]}\n`)
     await expect(writeEnvironment(testDeployment({ stateDir: dir }), [])).rejects.toThrow(`${join(workerBin(dir), 'notes')} was not written by dsh-superagent`)
@@ -66,7 +100,7 @@ describe('worker shims', () => {
     const legacy = (file: string, name: string) => writeFileSync(file, readFileSync(file, 'utf8').replace('Written by dsh-superagent', `Written by ${name}`))
     legacy(join(workerBin(dir), 'old-cli'), 'dsh-tag'); legacy(join(workerBin(dir), 'older-cli'), 'dsh-freelancer'); legacy(workerGitConfig(dir), 'dsh-go')
     await writeEnvironment(testDeployment({ stateDir: dir }), [])
-    expect(readdirSync(workerBin(dir)).sort()).toEqual(['gh', 'lark-cli'])
+    expect(readdirSync(workerBin(dir)).sort()).toEqual(['gh', 'gitee-cli', 'lark-cli'])
     expect(readFileSync(workerGitConfig(dir), 'utf8')).toContain('Written by dsh-superagent')
   })
 })

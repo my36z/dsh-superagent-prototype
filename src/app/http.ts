@@ -46,6 +46,7 @@ export interface HttpHost {
   /** Resolved deployment; throws if read while waiting for setup (`!configured()`). */
   readonly deployment: Deployment
   readonly setupProblem?: SetupProblem | undefined
+  readonly githubProblem?: SetupProblem | undefined
   readonly feishuProblem?: SetupProblem | undefined
   readonly giteeProblem?: SetupProblem | undefined
   configured(): boolean
@@ -97,10 +98,14 @@ function machineView({ stateDir, promptMaxChars, admissionContextMaxPages, admis
 }
 function setupView(runtime: HttpHost) {
   const resolved = runtime.configured() ? runtime.deployment : undefined
+  // The delivery host is the configured repository Source: GitHub in a GitHub deployment, Gitee when only Gitee runs.
+  const host = resolved?.github ?? resolved?.gitee
   return {
-    machine: machineView(runtime.machine), problem: runtime.setupProblem ?? null, feishuProblem: runtime.feishuProblem ?? null,
-    giteeProblem: runtime.giteeProblem ?? null,
-    accounts: resolved ? { repository: resolved.repository, agent: resolved.github.login, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null } : null,
+    machine: machineView(runtime.machine), problem: runtime.setupProblem ?? null, githubProblem: runtime.githubProblem ?? null,
+    feishuProblem: runtime.feishuProblem ?? null, giteeProblem: runtime.giteeProblem ?? null,
+    accounts: resolved && host ? { repository: host.repository, agent: host.login,
+      source: resolved.github ? 'github' as const : 'gitee' as const,
+      feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null } : null,
   }
 }
 /** Build the `/orchestrator/api/state` response consumed by the management panel and `scripts/dsh-superagent status` (`docs/006-deployment.md`). */
@@ -112,7 +117,7 @@ export function stateView(runtime: HttpHost) {
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
-  problem: runtime.setupProblem, feishuProblem: runtime.feishuProblem, giteeProblem: runtime.giteeProblem })
+  problem: runtime.setupProblem, githubProblem: runtime.githubProblem, feishuProblem: runtime.feishuProblem, giteeProblem: runtime.giteeProblem })
 export type StateView = ReturnType<typeof stateView>
 /** Builds a ticket's detail view; `environment` is empty while waiting for setup because it requires the resolved deployment. */
 function ticketPage(runtime: HttpHost, id: string) {
@@ -157,7 +162,7 @@ function routes(runtime: HttpHost): Routes {
   return {
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
-      executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem ?? runtime.giteeProblem),
+      executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.githubProblem ?? runtime.feishuProblem ?? runtime.giteeProblem),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),

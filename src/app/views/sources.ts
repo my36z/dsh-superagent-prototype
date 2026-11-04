@@ -24,12 +24,15 @@ export interface SetupState {
   deployment?: Deployment | undefined
   /** Setup failure that stops all Sources. */
   problem?: SetupProblem | undefined
+  /** GitHub repository or account check failure that pauses only the GitHub Source. */
+  githubProblem?: SetupProblem | undefined
   /** Feishu bot check failure that pauses only the Feishu Source. */
   feishuProblem?: SetupProblem | undefined
   /** Gitee repository or account check failure that pauses only the Gitee Source. */
   giteeProblem?: SetupProblem | undefined
 }
-export const problemOf = (id: string, setup: SetupState) => [setup.problem, setup.feishuProblem, setup.giteeProblem].find(problem => problem?.place === id)
+export const problemOf = (id: string, setup: SetupState) =>
+  [setup.problem, setup.githubProblem, setup.feishuProblem, setup.giteeProblem].find(problem => problem?.place === id)
 /** Source lifecycle state in priority order: missing kind, disabled, setup/part error, blocked on global setup, starting, paused, or ready. */
 export type SourceState = 'missing' | 'off' | 'error' | 'setup' | 'starting' | 'paused' | 'ready'
 function sourceState(instance: SourceInstance & { installed: boolean }, parts: { state: string }[], setup: SetupState): SourceState {

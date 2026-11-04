@@ -25,18 +25,25 @@ export interface ExecutorToolsHost {
 }
 
 /**
- * The Source that binds this ticket's pull request: the one it follows, else its origin Source. Feishu tickets, which have
- * no pull request rules, deliver on GitHub, the deployment's host in this version; every other Source keeps its own name, so
- * a Gitee ticket cannot silently become a GitHub one.
+ * The Source that binds this ticket's pull request: the one it follows, else its origin Source. A Feishu ticket has no
+ * pull request rules, so it delivers on the configured repository Source, GitHub when it is resolved and Gitee otherwise;
+ * every other Source keeps its own name, so a Gitee ticket cannot silently become a GitHub one.
  */
 function pullSource(host: ExecutorToolsHost, ticket: Ticket): { capability: PullRequestKind; context: SourceContext } | { error: string } {
   const followed = pullOf(ticket)
   const origin = host.store.triggers.get(ticket.origin.triggerId)?.source
-  const source = followed?.source ?? (origin === 'feishu' ? 'github' : origin)
+  const source = followed?.source ?? (origin === 'feishu' ? deliverySource(host) : origin)
   const capability = source ? host.sources.pullRequests(source) : undefined
   const context = source ? host.sourceContext(source) : undefined
   if (!source || !capability || !context) return { error: `The ${source ?? 'ticket'} Source has no pull request support; report without pr_number` }
   return { capability, context }
+}
+
+/** The repository Source a Feishu ticket delivers on: GitHub while setup resolved it, else Gitee. */
+function deliverySource(host: ExecutorToolsHost): string {
+  const github = host.sourceContext('github')
+  if (github?.deployment.github) return 'github'
+  return host.sourceContext('gitee')?.deployment.gitee ? 'gitee' : 'github'
 }
 
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {

@@ -24,11 +24,22 @@ export function declaredVariables(sources: SourceRegistry, settings?: Settings):
     ...sources.declarations().map(({ kind, variables }) => ({ owner: kind, enabled: on.has(kind), variables }))]
 }
 
+/** The Source whose repository environment applies to `trigger`: its own, or GitHub (else Gitee) for a Feishu Ticket. */
+function repositorySource(trigger: Trigger, deployment: Deployment): string | undefined {
+  if (trigger.source === 'github' || trigger.source === 'gitee') return trigger.source
+  // A Feishu Ticket has no repository of its own; it delivers on GitHub while that Source is configured.
+  if (trigger.source === 'feishu') return deployment.github ? 'github' : deployment.gitee ? 'gitee' : undefined
+  return undefined
+}
+
 export function environmentOf(input: { deployment: Deployment; sources: SourceRegistry; settings: Settings; ticket?: { id: string; name: string; directory: string }; trigger?: Trigger }): Variable[] {
   const { deployment, sources, settings, ticket, trigger } = input
   const executor: Record<string, string> = { DSH_SUPERAGENT_BLOCKED_COMMANDS: settings.executor.blockedCommands.join(' '), ...ticket ? { DSH_SUPERAGENT_DIR: ticket.directory, DSH_SUPERAGENT_NAME: ticket.name, DSH_SUPERAGENT_TICKET: ticket.id } : {} }
   const result: Variable[] = EXECUTOR_VARIABLES.filter(spec => !spec.ticket || ticket).map(spec => ({ key: spec.key, value: executor[spec.key] ?? '', description: spec.description, owner: 'executor' }))
+  const target = trigger && ticket ? repositorySource(trigger, deployment) : undefined
   for (const { kind, environment, config } of sources.environments(settings)) {
+    // A Ticket sees the repository variables of its own Source only, so a Gitee Ticket does not need (or see) GitHub's.
+    if (environment.repository && (!environment.ready?.(deployment) || target !== undefined && kind.kind !== target)) continue
     const values = environment.values({ deployment, config, ...trigger ? { trigger } : {} })
     for (const spec of environment.variables) result.push({ key: spec.key, value: values[spec.key] ?? '', description: spec.description, owner: kind.kind })
   }
